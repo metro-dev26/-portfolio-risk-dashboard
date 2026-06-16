@@ -228,6 +228,19 @@ st.markdown(f"""
     </div>
 </div>""", unsafe_allow_html=True)
 
+# ── HOW TO USE (always visible, even if sidebar is collapsed) ─
+st.markdown("""
+<div class='insight'>
+    <div class='insight-icon'>👈</div>
+    <div class='insight-text'>
+        <strong>This dashboard is interactive — build your own portfolio.</strong>
+        All controls are in the panel on the left: choose stocks, set their weights, the portfolio
+        value, and the confidence level. Every number and chart below recomputes instantly.
+        <strong>Don't see the panel?</strong> Click the <strong>›</strong> arrow at the very
+        top-left of the page to open it.
+    </div>
+</div>""", unsafe_allow_html=True)
+
 # ── HEADLINE METRICS ──────────────────────────────────────────
 st.markdown("<div class='sec'>Daily downside risk · ${:,.0f} portfolio · {}% confidence</div>".format(
     port_val, int(conf * 100)), unsafe_allow_html=True)
