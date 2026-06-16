@@ -49,7 +49,11 @@ st.markdown("""
 .stApp { background: var(--bg) !important; }
 html, body, [class*="css"] { font-family:'DM Sans',sans-serif; color:var(--text); background:var(--bg); }
 section[data-testid="stSidebar"] { background:var(--surface) !important; border-right:1px solid var(--border); }
-#MainMenu, footer, header { visibility:hidden; }
+#MainMenu, footer { visibility:hidden; }
+header { background:transparent !important; }
+/* Keep the sidebar open/collapse control visible so the panel can always be reopened */
+[data-testid="stSidebarCollapsedControl"], [data-testid="collapsedControl"] {
+    visibility:visible !important; display:flex !important; z-index:999999; }
 
 .hero {
     background:linear-gradient(135deg,#071428 0%,#0a1e35 60%,#071428 100%);
