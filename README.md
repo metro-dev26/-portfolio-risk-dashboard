@@ -3,7 +3,7 @@
 A focused tool for measuring portfolio downside risk the way professional investors do —
 built to understand, and show, how risk is actually measured.
 
-**Live demo:** _(add your Streamlit Cloud URL here once deployed)_
+**Live demo:** (C:\Users\sujan\portfolio-risk-dashboard\)
 
 ## What it does
 
