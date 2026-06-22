@@ -1,39 +1,77 @@
 # Portfolio Risk Dashboard
 
-A focused tool for measuring portfolio downside risk the way professional investors do —
-built to understand, and show, how risk is actually measured.
+A web application for measuring and explaining portfolio risk. It computes institutional-grade
+downside-risk metrics, runs historical crisis stress tests, performs Markowitz optimization and
+Monte Carlo simulation, and benchmarks a portfolio against the S&P 500 — with every metric
+explained in plain language.
 
-**LIVE DEMO: - https://icn93ppxyjtbgd5sxdjvpb.streamlit.app/
+**Live application:** https://icn93ppxyjtbgd5sxdjvpb.streamlit.app/
 
-## What it does
+> Educational risk simulator. Not financial advice.
 
-You build a portfolio from US large-caps, set weights, a dollar value, and a confidence level.
-Every figure is computed **live from real Yahoo Finance data** — nothing is hardcoded:
+![Dashboard overview](screenshots/01-dashboard.png)
 
-- **Historical VaR & CVaR** — the honest, non-parametric loss numbers (CVaR is the headline:
-  it answers "when it goes bad, how bad?").
-- **Gaussian VaR & the Hidden Risk Gap** — how much risk a standard bell-curve model quietly
-  misses, because real returns have fat tails.
-- **Annualized volatility, Sharpe ratio, maximum drawdown** — the standard portfolio profile.
-- **Return distribution** chart — actual returns vs the Gaussian assumption, side by side.
-- **Drawdown** chart and a **correlation heatmap** of the holdings.
-- An explicit **limitations** section — knowing where a model breaks is the point.
+## Features
 
-## Why it's built this way
+Portfolios are constructed from US large-cap equities and bond ETFs using actual dollar
+amounts. The application provides:
 
-Standard risk models assume returns follow a normal distribution. They don't — crashes are
-bigger and more frequent than a bell curve predicts. This dashboard leads with the historical
-(real-data) numbers and shows the gap against the Gaussian model, so the risk that standard
-tools underestimate is visible.
+- **Risk metrics** — Historical VaR and CVaR, annualized volatility, Sharpe ratio, maximum
+  drawdown, a holdings correlation heatmap, and the divergence between empirical fat-tailed
+  returns and a Gaussian model.
+- **Crisis stress testing** — Portfolio performance through the 2018 Q4 selloff, the COVID-19
+  crash, and the 2022 bear market, reporting total loss, worst single day, and maximum drawdown
+  for each event.
+- **Markowitz optimization** — The efficient frontier, maximum-Sharpe and minimum-variance
+  portfolios, and a suggested reallocation with a diversification assessment.
+- **Monte Carlo simulation** — 10,000 bootstrap paths over a configurable horizon, an outcome
+  cone, and probabilities of loss and of significant gain.
+- **S&P 500 benchmark** — Growth-of-capital comparison, beta, and a risk-adjusted performance
+  assessment.
+- **Risk contribution analysis** — Component contribution to total portfolio risk, identifying
+  the primary risk drivers and the holdings that provide diversification.
+- **Beginner's Guide** — An explanatory mode that defines every metric in plain language for
+  non-specialist users.
 
-## Run locally
+## Screenshots
+
+**Return distribution and S&P 500 benchmark** — empirical returns against the Gaussian
+assumption, with growth-of-capital versus the benchmark.
+
+![Return distribution and benchmark](screenshots/02-distribution.png)
+
+**Crisis stress testing** — the portfolio's drawdown history and its performance through past
+market crises.
+
+![Crisis stress testing](screenshots/03-stress-test.png)
+
+**Risk contribution analysis** — correlation heatmap and each holding's share of capital versus
+its share of total portfolio risk.
+
+![Risk contribution analysis](screenshots/04-risk-contribution.png)
+
+**Markowitz optimization** — the efficient frontier and a suggested reallocation table.
+
+![Markowitz optimization](screenshots/05-optimizer.png)
+
+## Methodology
+
+Standard risk models assume returns follow a normal distribution. Empirical returns do not:
+losses are larger and more frequent than a bell curve predicts. The application leads with
+historical, real-data measures and surfaces the gap against the Gaussian model, making the
+tail risk that conventional tools understate explicit.
+
+## Installation
 
 ```bash
 pip install -r requirements.txt
-streamlit run app.py
+python -m streamlit run app.py
 ```
 
-## Tech
+Live prices are retrieved directly from the Yahoo Finance chart API via `urllib`. A frozen
+snapshot (`prices.csv`) is included as a fallback, allowing the application to run without
+external API keys.
 
-Streamlit · NumPy · pandas · SciPy · Plotly · yfinance. Data: Yahoo Finance, end-of-day,
-cached and refreshed hourly.
+## Tech Stack
+
+Streamlit · NumPy · pandas · SciPy · Plotly. Data source: Yahoo Finance end-of-day prices.
