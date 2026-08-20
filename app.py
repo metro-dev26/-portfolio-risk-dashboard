@@ -204,63 +204,13 @@ BONDS = {"TLT", "IEF", "AGG", "LQD"}
 ASSET_CLASS = {t: ("Bond" if t in BONDS else "Equity") for t in TICKERS}
 
 TRADING_DAYS = 252
-SNAPSHOT = os.path.join(os.path.dirname(__file__), "prices.csv")
+
+from risk_engine.data import load_prices
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load():
-    """Return (prices, log_returns, source_label).
-
-    Pulls live daily prices from Yahoo Finance through Python's own HTTP/SSL
-    stack — this works behind antivirus / corporate networks that do HTTPS
-    inspection and break curl-based clients. Any ticker that fails is dropped
-    rather than crashing. If the live pull is unusable, falls back to a frozen
-    snapshot (prices.csv) so the dashboard never breaks in front of an audience.
-    """
-    import urllib.request
-    import json
-    import datetime
-
-    def fetch(sym):
-        p1 = int(datetime.datetime(2018, 1, 1).timestamp())
-        p2 = int(datetime.datetime.now().timestamp())
-        url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}"
-               f"?period1={p1}&period2={p2}&interval=1d")
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        d = json.loads(urllib.request.urlopen(req, timeout=15).read())
-        r = d["chart"]["result"][0]
-        idx = pd.to_datetime([datetime.date.fromtimestamp(t) for t in r["timestamp"]])
-        cl = r["indicators"]["adjclose"][0]["adjclose"]
-        return pd.Series(cl, index=idx, name=sym)
-
-    prices, source = None, None
-
-    # 1) Live pull (Python SSL — survives HTTPS-inspecting networks)
-    try:
-        series = {}
-        for t in TICKERS + ["SPY"]:   # SPY = S&P 500 benchmark
-            try:
-                s = fetch(t)
-                if s.notna().sum() > 500:
-                    series[t] = s
-            except Exception:
-                pass
-        if len(series) >= 2:
-            prices = pd.concat(series.values(), axis=1).ffill().dropna()
-            source = "Yahoo Finance · live"
-    except Exception:
-        prices = None
-
-    # 2) Frozen snapshot fallback
-    if prices is None or prices.shape[1] < 2:
-        if os.path.exists(SNAPSHOT):
-            prices = pd.read_csv(SNAPSHOT, index_col=0, parse_dates=True).ffill().dropna()
-            source = f"frozen snapshot · {prices.index.max().date()}"
-        else:
-            return None, None, None
-
-    lr = np.log(prices / prices.shift(1)).dropna()
-    return prices, lr, source
+    return load_prices(prefer_live=True)
 
 
 with st.spinner("Loading market data..."):
