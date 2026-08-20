@@ -609,14 +609,10 @@ st.markdown("<div class='sec'>Risk contribution — who really drives your risk,
 st.caption("A holding can be a small slice of your capital but a big slice of your risk — or the "
            "reverse. This splits total portfolio risk into how much each holding actually contributes.")
 
-_cov_rc = (lr[selected].cov() * TRADING_DAYS).to_numpy()
-_pv = float(np.sqrt(weights @ _cov_rc @ weights))
-if _pv > 0:
-    _mcr = (_cov_rc @ weights) / _pv      # marginal contribution to risk
-    _ccr = weights * _mcr                  # component contribution (sums to portfolio vol)
-    risk_pct = _ccr / _ccr.sum()
-else:
-    risk_pct = weights.copy()
+from risk_engine import optimize
+
+_cov_rc = optimize.sample_cov(lr, selected)
+risk_pct = optimize.risk_contribution(_cov_rc, weights)
 
 rcfig = go.Figure()
 rcfig.add_trace(go.Bar(x=selected, y=weights * 100, name="Capital %", marker_color="#4d9fff"))
@@ -650,35 +646,24 @@ st.markdown(f"""
 </div>""", unsafe_allow_html=True)
 
 # ── PORTFOLIO OPTIMIZER & DIVERSIFICATION ─────────────────────
-from scipy.optimize import minimize
-
 st.markdown("<div class='sec'>Optimizer — where you are vs. where the math says you should be</div>",
             unsafe_allow_html=True)
 st.caption("Markowitz mean-variance optimization on your holdings (long-only, fully invested). "
            "Educational only — historical returns are a noisy guide to the future, never a promise.")
 
-mu_v = (lr[selected].mean() * TRADING_DAYS).to_numpy()
-cov_m = (lr[selected].cov() * TRADING_DAYS).to_numpy()
+with st.sidebar:
+    use_shrinkage = st.checkbox(
+        "Use Ledoit-Wolf shrinkage (robust covariance)", value=False,
+        help="Shrinks the noisy sample covariance toward a stable target so the "
+             "optimizer stops chasing estimation error. Standard practice on real desks.")
+
+mu_v = optimize.annualized_mean(lr, selected)
+cov_m = optimize.ledoit_wolf_cov(lr, selected) if use_shrinkage else optimize.sample_cov(lr, selected)
 nA = len(selected)
 
-
-def _perf(w):
-    r = float(w @ mu_v)
-    v = float(np.sqrt(w @ cov_m @ w))
-    return r, v, (r / v if v > 0 else 0.0)
-
-
-_cons = ({"type": "eq", "fun": lambda w: w.sum() - 1.0},)
-_bnds = tuple((0.0, 1.0) for _ in range(nA))
-_w0 = np.ones(nA) / nA
-
 try:
-    w_ms = minimize(lambda w: -_perf(w)[2], _w0, method="SLSQP",
-                    bounds=_bnds, constraints=_cons).x
-    w_mv = minimize(lambda w: float(w @ cov_m @ w), _w0, method="SLSQP",
-                    bounds=_bnds, constraints=_cons).x
-    w_ms = np.clip(w_ms, 0, None); w_ms = w_ms / w_ms.sum()
-    w_mv = np.clip(w_mv, 0, None); w_mv = w_mv / w_mv.sum()
+    w_ms = optimize.max_sharpe_weights(mu_v, cov_m)
+    w_mv = optimize.min_variance_weights(cov_m)
     opt_ok = True
 except Exception:
     opt_ok = False
@@ -686,9 +671,9 @@ except Exception:
 if not opt_ok:
     st.info("Optimizer couldn't converge for this selection — try different holdings.")
 else:
-    cur_r, cur_v, cur_s = _perf(weights)
-    ms_r, ms_v, ms_s = _perf(w_ms)
-    mv_r, mv_v, mv_s = _perf(w_mv)
+    cur_r, cur_v, cur_s = optimize.perf(weights, mu_v, cov_m)
+    ms_r, ms_v, ms_s = optimize.perf(w_ms, mu_v, cov_m)
+    mv_r, mv_v, mv_s = optimize.perf(w_mv, mu_v, cov_m)
 
     o1, o2, o3 = st.columns(3)
     with o1:
@@ -711,15 +696,7 @@ else:
             </div>""", unsafe_allow_html=True)
 
     # Efficient frontier
-    fr_v, fr_r = [], []
-    for tr in np.linspace(mv_r, float(mu_v.max()), 40):
-        c = ({"type": "eq", "fun": lambda w: w.sum() - 1.0},
-             {"type": "eq", "fun": lambda w, tr=tr: float(w @ mu_v) - tr})
-        res = minimize(lambda w: float(w @ cov_m @ w), _w0, method="SLSQP",
-                       bounds=_bnds, constraints=c)
-        if res.success:
-            fr_v.append(float(np.sqrt(res.fun)) * 100)
-            fr_r.append(tr * 100)
+    fr_v, fr_r = optimize.efficient_frontier(mu_v, cov_m, n_points=40)
 
     effig = go.Figure()
     if fr_v:
