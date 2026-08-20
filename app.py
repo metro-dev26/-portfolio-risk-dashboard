@@ -30,6 +30,7 @@ from risk_engine.data import load_prices
 from risk_engine import metrics
 from risk_engine import optimize
 from risk_engine import backtest
+from risk_engine import factors as fac
 
 st.set_page_config(
     page_title="Portfolio Risk Dashboard",
@@ -746,6 +747,85 @@ st.markdown(f"""
         the blue one means that holding drives more danger than its size suggests.{_div_txt}
         This is exactly why equal-dollar weighting is not equal-<em>risk</em> weighting — and it's the gap
         the optimizer below closes.
+    </div>
+</div>""", unsafe_allow_html=True)
+
+# ── FACTOR EXPOSURE (Fama-French 3-factor) ────────────────────
+st.markdown("<div class='sec'>Factor exposure — what bets is this portfolio really making?</div>",
+            unsafe_allow_html=True)
+st.caption("Every portfolio is a bundle of a few underlying bets. The Fama-French model splits "
+           "returns into three: the market, company size (small vs large), and value vs growth. "
+           "Regressing this portfolio on them shows the tilts you actually hold — and how much of "
+           "your risk is plain market beta vs bets you chose.")
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _run_factors(returns_values, index_values):
+    s = pd.Series(returns_values, index=pd.to_datetime(index_values))
+    f = fac.load_factors()
+    reg = fac.factor_regression(s, f)
+    attr = fac.variance_attribution(reg)
+    return reg, attr
+
+
+_freg, _fattr = _run_factors(pr.to_numpy(), pr.index.values)
+
+_LABEL = {"Mkt-RF": "Market", "SMB": "Size (small−large)", "HML": "Value (value−growth)"}
+_rows = ""
+for name in fac.FACTOR_NAMES:
+    b = _freg["betas"][name]
+    tilt = ("—" if abs(b) < 0.05 else
+            ("tilts toward " + ("small-cap" if name == "SMB" and b > 0 else
+                                "large-cap" if name == "SMB" else
+                                "value" if name == "HML" and b > 0 else
+                                "growth" if name == "HML" else
+                                "more market risk" if b > 1 else "less market risk")))
+    _rows += (f"<tr>"
+              f"<td style='padding:10px 14px;color:#8a9bb8;'>{_LABEL[name]}</td>"
+              f"<td style='padding:10px 14px;text-align:right;font-family:DM Mono;font-weight:600;'>{b:+.2f}</td>"
+              f"<td style='padding:10px 14px;color:#6a849e;'>{tilt}</td>"
+              f"</tr>")
+st.markdown(f"""
+<table style='width:100%;border-collapse:collapse;background:var(--card);
+              border:1px solid var(--border);border-radius:10px;overflow:hidden;'>
+    <tr style='background:#0c1220;'>
+        <th style='padding:10px 14px;text-align:left;font-family:DM Mono;font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:#5a7088;'>Factor</th>
+        <th style='padding:10px 14px;text-align:right;font-family:DM Mono;font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:#4d9fff;'>Beta</th>
+        <th style='padding:10px 14px;text-align:left;font-family:DM Mono;font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:#5a7088;'>Reading</th>
+    </tr>
+    {_rows}
+</table>""", unsafe_allow_html=True)
+
+# Variance decomposition bar
+_names = fac.FACTOR_NAMES + ["Idiosyncratic"]
+_vals = [_fattr[n] * 100 for n in _names]
+_colors = ["#4d9fff", "#ffb347", "#05d69e", "#5a7088"]
+ffig = go.Figure(go.Bar(x=[_LABEL.get(n, n) for n in _names], y=_vals,
+                        marker_color=_colors, text=[f"{v:.0f}%" for v in _vals],
+                        textposition="outside"))
+ffig.update_layout(plot_bgcolor="#0c1220", paper_bgcolor="#0c1220",
+                   font=dict(color="#dde4f0", family="DM Sans"),
+                   xaxis=dict(gridcolor="#1c2d44"),
+                   yaxis=dict(title="% of portfolio variance", gridcolor="#1c2d44"),
+                   height=340, margin=dict(l=20, r=20, t=20, b=20), showlegend=False)
+st.plotly_chart(ffig, width="stretch")
+
+_mkt_pct = _fattr["Mkt-RF"] * 100
+_smb, _hml = _freg["betas"]["SMB"], _freg["betas"]["HML"]
+_size_word = "small-cap" if _smb > 0.05 else "large-cap" if _smb < -0.05 else "size-neutral"
+_val_word = "value" if _hml > 0.05 else "growth" if _hml < -0.05 else "style-neutral"
+st.markdown(f"""
+<div class='insight'>
+    <div class='insight-icon'>🧬</div>
+    <div class='insight-text'>
+        <strong>Your portfolio in one sentence:</strong> about <strong>{_mkt_pct:.0f}%</strong> of its
+        risk is plain market beta (market β = {_freg['betas']['Mkt-RF']:.2f}), with a
+        <strong>{_size_word}</strong> tilt and a <strong>{_val_word}</strong> lean. Annualized alpha —
+        the return not explained by these three factors — is <strong>{_freg['alpha_annual']*100:+.1f}%</strong>,
+        and the model explains <strong>{_freg['r2']*100:.0f}%</strong> of the day-to-day moves (R²).
+        Alpha this small is the honest norm: most of what a diversified portfolio does is factor exposure,
+        not stock-picking magic. Factor betas here regress log excess returns on the simple Fama-French
+        factors — a standard daily-frequency approximation.
     </div>
 </div>""", unsafe_allow_html=True)
 
