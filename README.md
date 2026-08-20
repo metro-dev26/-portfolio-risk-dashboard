@@ -61,6 +61,23 @@ losses are larger and more frequent than a bell curve predicts. The application 
 historical, real-data measures and surfaces the gap against the Gaussian model, making the
 tail risk that conventional tools understate explicit.
 
+### Model Validation
+
+Value-at-Risk is only meaningful once it has been backtested. A 250-day rolling
+window is walked across the full history; each day the realized loss is compared
+to the VaR estimate to flag a breach. Two standard tests then judge the model:
+
+- **Kupiec POF** (unconditional coverage) — is the breach *rate* consistent with
+  the stated confidence level?
+- **Christoffersen** (conditional coverage) — do breaches arrive independently, or
+  cluster together in crises?
+
+Historical and Gaussian VaR are scored side by side, exposing where the
+normal-distribution assumption underestimates real tail risk. Fat-tailed
+Student-t VaR/CVaR and Ledoit-Wolf covariance shrinkage are also available, the
+latter producing more robust optimizer weights by shrinking the noisy sample
+covariance toward a stable target.
+
 ## Installation
 
 ```bash
