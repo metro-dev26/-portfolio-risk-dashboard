@@ -29,3 +29,23 @@ def test_metrics_reproduce_golden(market, ref_weights, golden):
     assert abs(metrics.annualized_vol(pr) - golden["ann_vol"]) < 1e-9
     assert abs(metrics.sharpe_ratio(pr) - golden["sharpe"]) < 1e-9
     assert abs(metrics.max_drawdown(pr) - golden["max_dd"]) < 1e-9
+
+
+def test_student_t_has_fatter_tail_than_gaussian_on_heavy_data():
+    from scipy.stats import t as tdist
+    import pandas as pd
+    rng = np.random.default_rng(1)
+    heavy = pd.Series(tdist.rvs(df=3, size=200_000, random_state=rng) * 0.01)
+    t_var, _ = metrics.student_t_var_cvar(heavy, 0.99)
+    g_var, _ = metrics.gaussian_var_cvar(heavy, 0.99)
+    # at 99%, a t-fit sees the fat tail Gaussian misses → more extreme (more negative)
+    assert t_var < g_var
+
+
+def test_student_t_cvar_worse_than_var():
+    from scipy.stats import t as tdist
+    import pandas as pd
+    rng = np.random.default_rng(2)
+    heavy = pd.Series(tdist.rvs(df=4, size=100_000, random_state=rng) * 0.01)
+    var, cvar = metrics.student_t_var_cvar(heavy, 0.95)
+    assert cvar < var
