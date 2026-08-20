@@ -78,6 +78,17 @@ Student-t VaR/CVaR and Ledoit-Wolf covariance shrinkage are also available, the
 latter producing more robust optimizer weights by shrinking the noisy sample
 covariance toward a stable target.
 
+### Factor Analysis
+
+Portfolio returns are regressed on the Fama-French three factors — market (Mkt-RF),
+size (SMB), and value (HML) — by ordinary least squares. The resulting betas expose
+the portfolio's tilts (small- vs large-cap, value vs growth), the annualized alpha
+measures return not explained by those factors, and R² measures how much of the
+daily variation the model captures. Portfolio variance is then attributed across the
+three factors and an idiosyncratic remainder. Factor data is a committed snapshot of
+the Kenneth French daily series; the regression uses log excess returns against the
+simple factor returns, a standard daily-frequency approximation.
+
 ## Installation
 
 ```bash
