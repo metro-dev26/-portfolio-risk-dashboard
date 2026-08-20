@@ -1070,10 +1070,11 @@ from risk_engine import backtest
 
 st.markdown("<div class='sec'>Model validation — did the risk numbers actually hold up?</div>",
             unsafe_allow_html=True)
-st.caption("A VaR estimate is only worth anything if it's been backtested. We roll a "
-           "250-day window across all history, and each day ask: did the real loss breach "
-           "the VaR? A 95% model should be breached ~5% of the time — no more, and not in clusters. "
-           "Kupiec tests the rate; Christoffersen tests that breaches don't bunch up in crises.")
+st.caption(f"A VaR estimate is only worth anything if it's been backtested. We roll a "
+           f"250-day window across all history, and each day ask: did the real loss breach "
+           f"the VaR? A {int(conf*100)}% model should be breached about {int(round((1-conf)*100))}% "
+           f"of the time — no more, and not in clusters. "
+           f"Kupiec tests the rate; Christoffersen tests that breaches don't bunch up in crises.")
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -1135,16 +1136,40 @@ st.plotly_chart(mvfig, width="stretch")
 
 _hist_row = next(r for r in bt_rows if r["method"] == "historical")
 _gauss_row = next(r for r in bt_rows if r["method"] == "gaussian")
+
+
+def _mv_rate(row):
+    return (f"gets the breach <em>rate</em> right (Kupiec p={row['kupiec_p']:.2f})"
+            if row["kupiec_p"] > 0.05
+            else f"breaks the expected rate (Kupiec p={row['kupiec_p']:.2f})")
+
+
+def _mv_clust(row):
+    return ("with breaches staying independent" if row["christoffersen_p"] > 0.05
+            else f"but breaches <strong>cluster in crises</strong> "
+                 f"(Christoffersen p={row['christoffersen_p']:.3f})")
+
+
+_both_cluster = (_hist_row["christoffersen_p"] <= 0.05
+                 and _gauss_row["christoffersen_p"] <= 0.05)
+_closing = (
+    "Both models get the frequency about right yet fail the independence test — real losses "
+    "bunch together in crises (COVID 2020, the 2022 bear), the exact stretches a static VaR "
+    "never sees coming. That gap is the honest limit of any single-number risk measure, and "
+    "naming it is the whole job."
+    if _both_cluster else
+    "A model earns trust only by passing both — the right rate <em>and</em> independent breaches. "
+    "That is the test a risk desk runs before it believes any VaR at all.")
 st.markdown(f"""
-<div class='insight {"warn" if not _gauss_row["passed"] else ""}'>
+<div class='insight warn'>
     <div class='insight-icon'>🧪</div>
     <div class='insight-text'>
         <strong>The honest scoreboard.</strong> Over the full history, historical VaR was breached
-        <strong>{_hist_row['breaches']}</strong> times vs <strong>{_hist_row['expected']}</strong> expected
-        (Kupiec p={_hist_row['kupiec_p']:.3f}), while the Gaussian model was breached
-        <strong>{_gauss_row['breaches']}</strong> times (Kupiec p={_gauss_row['kupiec_p']:.3f}).
-        A p-value below 0.05 means the model is rejected — the number it reports can't be trusted.
-        This is the test a risk desk runs before it believes any VaR at all.
+        <strong>{_hist_row['breaches']}</strong> times vs <strong>{_hist_row['expected']}</strong> expected,
+        and Gaussian <strong>{_gauss_row['breaches']}</strong> times. Historical {_mv_rate(_hist_row)}
+        {_mv_clust(_hist_row)}; Gaussian {_mv_rate(_gauss_row)} {_mv_clust(_gauss_row)}.
+        Kupiec asks whether the breach <em>rate</em> matches the confidence level; Christoffersen asks
+        whether breaches arrive <em>independently</em> or bunch together. {_closing}
     </div>
 </div>""", unsafe_allow_html=True)
 ```
