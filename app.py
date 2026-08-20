@@ -603,6 +603,114 @@ hm.update_layout(plot_bgcolor="#0c1220", paper_bgcolor="#0c1220",
                  height=420, margin=dict(l=20, r=20, t=20, b=20))
 st.plotly_chart(hm, width="stretch")
 
+# ── MODEL VALIDATION: DID THE VAR ACTUALLY HOLD? ──────────────
+from risk_engine import backtest
+
+st.markdown("<div class='sec'>Model validation — did the risk numbers actually hold up?</div>",
+            unsafe_allow_html=True)
+st.caption(f"A VaR estimate is only worth anything if it's been backtested. We roll a "
+           f"250-day window across all history, and each day ask: did the real loss breach "
+           f"the VaR? A {int(conf*100)}% model should be breached about {int(round((1-conf)*100))}% "
+           f"of the time — no more, and not in clusters. "
+           f"Kupiec tests the rate; Christoffersen tests that breaches don't bunch up in crises.")
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _run_backtest(returns_values, conf, window):
+    s = pd.Series(returns_values)
+    rows = backtest.backtest_var(s, conf, window, methods=("historical", "gaussian"))
+    hist = backtest.rolling_var_breaches(s, conf, window, "historical")
+    return rows, hist
+
+
+bt_rows, bt_hist = _run_backtest(pr.to_numpy(), conf, 250)
+
+rows_html = ""
+for row in bt_rows:
+    verdict = "PASS" if row["passed"] else "FAIL"
+    vcol = "#05d69e" if row["passed"] else "#ff3d5a"
+    rows_html += (
+        f"<tr>"
+        f"<td style='padding:10px 14px;color:#8a9bb8;text-transform:capitalize;'>{row['method']}</td>"
+        f"<td style='padding:10px 14px;text-align:right;font-family:DM Mono;'>{row['breaches']}</td>"
+        f"<td style='padding:10px 14px;text-align:right;font-family:DM Mono;color:#6a849e;'>{row['expected']}</td>"
+        f"<td style='padding:10px 14px;text-align:right;font-family:DM Mono;'>{row['kupiec_p']:.3f}</td>"
+        f"<td style='padding:10px 14px;text-align:right;font-family:DM Mono;'>{row['christoffersen_p']:.3f}</td>"
+        f"<td style='padding:10px 14px;text-align:right;font-family:DM Mono;font-weight:600;color:{vcol};'>{verdict}</td>"
+        f"</tr>")
+st.markdown(f"""
+<table style='width:100%;border-collapse:collapse;background:var(--card);
+              border:1px solid var(--border);border-radius:10px;overflow:hidden;'>
+    <tr style='background:#0c1220;'>
+        <th style='padding:10px 14px;text-align:left;font-family:DM Mono;font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:#5a7088;'>Method</th>
+        <th style='padding:10px 14px;text-align:right;font-family:DM Mono;font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:#5a7088;'>Breaches</th>
+        <th style='padding:10px 14px;text-align:right;font-family:DM Mono;font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:#5a7088;'>Expected</th>
+        <th style='padding:10px 14px;text-align:right;font-family:DM Mono;font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:#4d9fff;'>Kupiec p</th>
+        <th style='padding:10px 14px;text-align:right;font-family:DM Mono;font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:#4d9fff;'>Christoffersen p</th>
+        <th style='padding:10px 14px;text-align:right;font-family:DM Mono;font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:#5a7088;'>Verdict</th>
+    </tr>
+    {rows_html}
+</table>""", unsafe_allow_html=True)
+
+# Breach-timeline chart for the historical method
+bt_dates = bt_hist["dates"]
+breach_mask = bt_hist["breach"].astype(bool)
+mvfig = go.Figure()
+mvfig.add_trace(go.Scatter(x=bt_dates, y=bt_hist["realized"] * 100, mode="lines",
+                           line=dict(color="#4d9fff", width=1), name="Daily return"))
+mvfig.add_trace(go.Scatter(x=bt_dates, y=bt_hist["var"] * 100, mode="lines",
+                           line=dict(color="#ffb347", width=1.5, dash="dash"), name="Historical VaR"))
+mvfig.add_trace(go.Scatter(x=[d for d, m in zip(bt_dates, breach_mask) if m],
+                           y=[r * 100 for r, m in zip(bt_hist["realized"], breach_mask) if m],
+                           mode="markers", marker=dict(color="#ff3d5a", size=6, symbol="x"),
+                           name="Breach"))
+mvfig.update_layout(plot_bgcolor="#0c1220", paper_bgcolor="#0c1220",
+                    font=dict(color="#dde4f0", family="DM Sans"),
+                    xaxis=dict(gridcolor="#1c2d44"),
+                    yaxis=dict(title="Daily return (%)", gridcolor="#1c2d44"),
+                    height=360, margin=dict(l=20, r=20, t=10, b=20),
+                    legend=dict(bgcolor="#111d2e", bordercolor="#1c2d44"))
+st.plotly_chart(mvfig, width="stretch")
+
+_hist_row = next(r for r in bt_rows if r["method"] == "historical")
+_gauss_row = next(r for r in bt_rows if r["method"] == "gaussian")
+
+
+def _mv_rate(row):
+    return (f"gets the breach <em>rate</em> right (Kupiec p={row['kupiec_p']:.2f})"
+            if row["kupiec_p"] > 0.05
+            else f"breaks the expected rate (Kupiec p={row['kupiec_p']:.2f})")
+
+
+def _mv_clust(row):
+    return ("with breaches staying independent" if row["christoffersen_p"] > 0.05
+            else f"but breaches <strong>cluster in crises</strong> "
+                 f"(Christoffersen p={row['christoffersen_p']:.3f})")
+
+
+_both_cluster = (_hist_row["christoffersen_p"] <= 0.05
+                 and _gauss_row["christoffersen_p"] <= 0.05)
+_closing = (
+    "Both models get the frequency about right yet fail the independence test — real losses "
+    "bunch together in crises (COVID 2020, the 2022 bear), the exact stretches a static VaR "
+    "never sees coming. That gap is the honest limit of any single-number risk measure, and "
+    "naming it is the whole job."
+    if _both_cluster else
+    "A model earns trust only by passing both — the right rate <em>and</em> independent breaches. "
+    "That is the test a risk desk runs before it believes any VaR at all.")
+st.markdown(f"""
+<div class='insight warn'>
+    <div class='insight-icon'>🧪</div>
+    <div class='insight-text'>
+        <strong>The honest scoreboard.</strong> Over the full history, historical VaR was breached
+        <strong>{_hist_row['breaches']}</strong> times vs <strong>{_hist_row['expected']}</strong> expected,
+        and Gaussian <strong>{_gauss_row['breaches']}</strong> times. Historical {_mv_rate(_hist_row)}
+        {_mv_clust(_hist_row)}; Gaussian {_mv_rate(_gauss_row)} {_mv_clust(_gauss_row)}.
+        Kupiec asks whether the breach <em>rate</em> matches the confidence level; Christoffersen asks
+        whether breaches arrive <em>independently</em> or bunch together. {_closing}
+    </div>
+</div>""", unsafe_allow_html=True)
+
 # ── RISK CONTRIBUTION ─────────────────────────────────────────
 st.markdown("<div class='sec'>Risk contribution — who really drives your risk, not just your money</div>",
             unsafe_allow_html=True)
