@@ -51,13 +51,31 @@ portfolio-risk-dashboard/
 
 ## Phase 1 — Credible risk engine (foundation + biggest single win)
 
-### Step 1 — Refactor, behavior-preserving
-Extract ONLY the modules the new work touches: `data`, `metrics`, `optimize`,
-plus new `backtest`. Leave stress/simulate/contribution in `app.py` for now —
-extracting code nothing new depends on is busywork, not architecture.
+### Step 1 — Refactor, behavior-preserving (TWO steps, not one)
+**Reality check (verified against actual `app.py`, 2026-08-20):** the file is a
+single 956-line *linear script*. Almost all computation is inline top-level code
+wired directly to Streamlit widget values (`selected`, `weights`, `conf`). Only
+four functions exist: `load()`, `stress()`, `_perf()`, `_vs()`. There is nothing
+to "just extract" — the math must first be lifted out of the inline flow.
 
-Guard it with a **golden-master test**: capture current outputs for a fixed
-portfolio *before* the refactor, assert byte-identical *after*.
+So the refactor is two moves:
+
+1. **Lift-in-place** — convert the inline math (VaR/CVaR at lines ~331–346,
+   optimizer/frontier ~711–803, risk contribution ~670–677, beta ~446–456,
+   Monte Carlo ~871–881) into *pure functions inside `app.py`*, behavior
+   unchanged.
+2. **Move out** — relocate those now-clean functions into `risk_engine/`.
+
+Extract ONLY what the new work touches: `data`, `metrics`, `optimize`, plus new
+`backtest`. Leave stress/simulate/contribution inline until a phase needs them.
+
+Guard the whole thing with a **golden-master test** (mandatory, not optional):
+capture current outputs for a fixed portfolio *before* step 1, assert identical
+*after* each step. This is the seatbelt that keeps the live URL working while the
+guts are replaced.
+
+**Free cleanup:** the covariance matrix is currently computed three times
+(lines 670, 719, and inside the beta calc). Extraction de-duplicates it.
 
 ### Step 2 — The methods that change how it reads
 
@@ -124,7 +142,7 @@ is a legit line for SWE intern roles. Planned lean, last, and trimmable without 
 
 | Decision | Choice | Reason |
 |---|---|---|
-| Test framework | pytest + existing AppTest | pytest for engine, AppTest for UI smoke |
+| Test framework | pytest (built from zero — no tests exist today) | pytest for engine; optional AppTest UI smoke later |
 | CI | GitHub Actions → green badge | cheap, reads as "real engineering" |
 | New deps | **avoid** sklearn & statsmodels | hand-roll Ledoit-Wolf (~15 lines) + `numpy.linalg.lstsq` for OLS; `scipy.stats` covers t / chi2 |
 | P3 deps | FastAPI + uvicorn + pydantic | only introduced in Phase 3 |
@@ -144,11 +162,15 @@ is a legit line for SWE intern roles. Planned lean, last, and trimmable without 
 
 ---
 
-## Pre-implementation verifications (blocking)
+## Pre-implementation verifications — DONE (2026-08-20)
 
-1. **Read `app.py` for real** — confirm current function boundaries so the extraction map is accurate, not guessed.
-2. **Check `prices.csv` date span** — does it hold enough history to make backtesting meaningful? The P1 headline rides on this.
-3. **Confirm the existing AppTest setup** — so the test suite builds on it instead of ignoring it.
+1. **Read `app.py` for real** — ✅ done. Finding: it's a linear script, not a set of
+   functions. Refactor is two-step (lift-in-place → move out), harder than first
+   scoped. Cov matrix computed 3×. Details folded into Phase 1 above.
+2. **Check `prices.csv` date span** — ✅ PASS. 2018-01-02 → 2026-06-18, 2,127 daily
+   rows (~8.5 yrs), 25 tickers + SPY. More than enough for rolling VaR backtesting.
+3. **Confirm existing AppTest setup** — ✅ done. Finding: no tests exist at all. The
+   suite is built from zero (corrected in Cross-cutting table).
 
 ---
 
