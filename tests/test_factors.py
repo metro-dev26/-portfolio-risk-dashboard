@@ -53,3 +53,33 @@ def test_near_pure_factor_portfolio_is_mostly_systematic():
     attr = fac.variance_attribution(reg)
     assert attr["Idiosyncratic"] < 0.05
     assert attr["Mkt-RF"] > 0.8
+
+
+def test_variance_attribution_allows_negative_factor_fraction():
+    """A factor's fraction is NOT clamped to [0, 1] — it can go negative when its
+    beta has the opposite sign to the covariance-weighted contribution of the
+    other factors. Here b_Mkt is small and negative while SMB carries a large
+    positive beta and Mkt-SMB covariance is positive, so the cross-covariance
+    term dominates and flips Mkt-RF's own contribution negative. Verified
+    empirically against the real factors.csv (see task report)."""
+    f = fac.load_factors()
+    b = np.array([-0.2, 2.3, -0.8])  # Mkt, SMB, HML
+    rng = np.random.default_rng(3)
+    port = pd.Series(f[fac.FACTOR_NAMES].to_numpy() @ b
+                     + f["RF"].to_numpy() + rng.normal(0, 1e-5, len(f)), index=f.index)
+    reg = fac.factor_regression(port, f)
+    attr = fac.variance_attribution(reg)
+    assert attr["Mkt-RF"] < -0.01
+    assert abs(sum(attr.values()) - 1.0) < 1e-9
+
+
+def test_variance_attribution_zero_total_fallback():
+    """total <= 0 (no systematic, no idiosyncratic variance) must hit the guard
+    branch: every factor fraction is exactly 0.0 and Idiosyncratic is 1.0."""
+    reg = {
+        "beta_vec": np.zeros(3),
+        "factor_cov": np.eye(3),
+        "resid_var_daily": 0.0,
+    }
+    attr = fac.variance_attribution(reg)
+    assert attr == {"Mkt-RF": 0.0, "SMB": 0.0, "HML": 0.0, "Idiosyncratic": 1.0}
