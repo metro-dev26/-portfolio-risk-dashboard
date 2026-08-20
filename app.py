@@ -623,7 +623,7 @@ def _run_backtest(returns_values, conf, window):
     return rows, hist
 
 
-bt_rows, bt_hist = _run_backtest(pr.to_numpy(), conf, 250)
+bt_rows, bt_hist = _run_backtest(pr, conf, 250)
 
 rows_html = ""
 for row in bt_rows:
