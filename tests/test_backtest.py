@@ -1,5 +1,7 @@
 import numpy as np
 import pandas as pd
+import pytest
+from scipy.stats import t as _t
 from risk_engine import backtest
 
 
@@ -48,3 +50,32 @@ def test_backtest_var_summary_shape():
     for row in rows:
         assert 0.0 <= row["kupiec_p"] <= 1.0
         assert isinstance(row["passed"], bool)
+
+
+def test_rolling_var_breaches_student_t():
+    """Student-t method should handle heavy-tailed distributions and return valid result."""
+    # Generate heavy-tailed sample from t-distribution with 4 degrees of freedom
+    rng = np.random.default_rng(42)
+    heavy_tailed = pd.Series(_t.rvs(4, loc=0, scale=0.01, size=1500, random_state=42))
+
+    res = backtest.rolling_var_breaches(heavy_tailed, conf=0.95, window=250, method="student_t")
+
+    # Verify result dict structure
+    assert "dates" in res and "var" in res and "realized" in res and "breach" in res
+
+    # Verify breach is 0/1 only
+    assert set(res["breach"]) <= {0, 1}
+
+    # Verify length consistency
+    expected_len = len(heavy_tailed) - 250
+    assert len(res["dates"]) == expected_len
+    assert len(res["var"]) == expected_len
+    assert len(res["realized"]) == expected_len
+    assert len(res["breach"]) == expected_len
+
+
+def test_rolling_var_breaches_invalid_method_raises():
+    """Invalid method should raise ValueError."""
+    r = pd.Series(np.random.randn(300))
+    with pytest.raises(ValueError, match="unknown method"):
+        backtest.rolling_var_breaches(r, conf=0.95, window=250, method="bogus")
