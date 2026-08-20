@@ -37,3 +37,25 @@ def factor_regression(port_returns, factors):
         "factor_cov": np.cov(X, rowvar=False),
         "n_obs": int(len(common)),
     }
+
+
+def variance_attribution(reg):
+    """Split portfolio variance into per-factor + idiosyncratic fractions (sum = 1).
+
+    Systematic variance = bᵀ Σ_f b; each factor's component is b_i · (Σ_f b)_i,
+    which sums to the systematic total. Residual variance is idiosyncratic.
+    """
+    b = reg["beta_vec"]
+    cov = reg["factor_cov"]
+    resid_var = reg["resid_var_daily"]
+    cov_b = cov @ b
+    per_factor = b * cov_b
+    systematic = float(b @ cov_b)
+    total = systematic + resid_var
+    if total <= 0:
+        out = {n: 0.0 for n in FACTOR_NAMES}
+        out["Idiosyncratic"] = 1.0
+        return out
+    out = {n: float(pf / total) for n, pf in zip(FACTOR_NAMES, per_factor)}
+    out["Idiosyncratic"] = float(resid_var / total)
+    return out

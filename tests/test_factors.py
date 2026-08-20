@@ -30,3 +30,26 @@ def test_regression_aligns_on_common_dates():
     port = pd.Series(np.zeros(len(half)), index=half)
     reg = fac.factor_regression(port, f)
     assert reg["n_obs"] == len(half)
+
+
+def test_variance_attribution_sums_to_one():
+    f = fac.load_factors()
+    rng = np.random.default_rng(1)
+    port = pd.Series(f[fac.FACTOR_NAMES].to_numpy() @ np.array([1.0, 0.2, -0.1])
+                     + f["RF"].to_numpy() + rng.normal(0, 1e-4, len(f)), index=f.index)
+    reg = fac.factor_regression(port, f)
+    attr = fac.variance_attribution(reg)
+    assert set(attr) == {"Mkt-RF", "SMB", "HML", "Idiosyncratic"}
+    assert abs(sum(attr.values()) - 1.0) < 1e-9
+
+
+def test_near_pure_factor_portfolio_is_mostly_systematic():
+    """Tiny residual noise → idiosyncratic fraction is small, market dominates."""
+    f = fac.load_factors()
+    rng = np.random.default_rng(2)
+    port = pd.Series(f[fac.FACTOR_NAMES].to_numpy() @ np.array([1.0, 0.0, 0.0])
+                     + f["RF"].to_numpy() + rng.normal(0, 1e-6, len(f)), index=f.index)
+    reg = fac.factor_regression(port, f)
+    attr = fac.variance_attribution(reg)
+    assert attr["Idiosyncratic"] < 0.05
+    assert attr["Mkt-RF"] > 0.8
