@@ -1,7 +1,10 @@
 """Fama-French 3-factor loading and analysis. Pure — no UI.
 Factors are stored as decimals (Mkt-RF, SMB, HML, RF are simple daily returns)."""
 import os
+import numpy as np
 import pandas as pd
+
+from risk_engine.config import TRADING_DAYS
 
 _FACTORS = os.path.join(os.path.dirname(os.path.dirname(__file__)), "factors.csv")
 FACTOR_NAMES = ["Mkt-RF", "SMB", "HML"]
@@ -10,3 +13,27 @@ FACTOR_NAMES = ["Mkt-RF", "SMB", "HML"]
 def load_factors():
     """Return the factor DataFrame (DatetimeIndex; columns Mkt-RF, SMB, HML, RF; decimals)."""
     return pd.read_csv(_FACTORS, index_col=0, parse_dates=True)
+
+
+def factor_regression(port_returns, factors):
+    """OLS of excess portfolio return (r_p - RF) on the 3 factors, via lstsq."""
+    common = port_returns.index.intersection(factors.index)
+    y = port_returns.loc[common].to_numpy() - factors.loc[common, "RF"].to_numpy()
+    X = factors.loc[common, FACTOR_NAMES].to_numpy()
+    design = np.column_stack([np.ones(len(X)), X])
+    coef, *_ = np.linalg.lstsq(design, y, rcond=None)
+    alpha, beta_vec = float(coef[0]), coef[1:]
+    resid = y - design @ coef
+    ss_res = float(resid @ resid)
+    ss_tot = float(((y - y.mean()) ** 2).sum())
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+    return {
+        "alpha_daily": alpha,
+        "alpha_annual": alpha * TRADING_DAYS,
+        "betas": {n: float(b) for n, b in zip(FACTOR_NAMES, beta_vec)},
+        "beta_vec": beta_vec,
+        "r2": r2,
+        "resid_var_daily": ss_res / len(y),
+        "factor_cov": np.cov(X, rowvar=False),
+        "n_obs": int(len(common)),
+    }
