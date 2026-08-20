@@ -9,7 +9,6 @@ Every number on this page is computed live from real market data.
 Nothing is hardcoded.
 """
 
-import os
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -26,6 +25,11 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from scipy.stats import norm
+
+from risk_engine.data import load_prices
+from risk_engine import metrics
+from risk_engine import optimize
+from risk_engine import backtest
 
 st.set_page_config(
     page_title="Portfolio Risk Dashboard",
@@ -205,8 +209,6 @@ ASSET_CLASS = {t: ("Bond" if t in BONDS else "Equity") for t in TICKERS}
 
 TRADING_DAYS = 252
 
-from risk_engine.data import load_prices
-
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load():
@@ -274,8 +276,6 @@ port_val = float(amounts.sum())
 weights = amounts / amounts.sum()
 
 # ── RISK ENGINE (all computed live) ───────────────────────────
-from risk_engine import metrics
-
 ret_sel = lr[selected].dropna()
 pr = metrics.portfolio_returns(lr, selected, weights)
 mu, std = pr.mean(), pr.std()
@@ -604,8 +604,6 @@ hm.update_layout(plot_bgcolor="#0c1220", paper_bgcolor="#0c1220",
 st.plotly_chart(hm, width="stretch")
 
 # ── MODEL VALIDATION: DID THE VAR ACTUALLY HOLD? ──────────────
-from risk_engine import backtest
-
 st.markdown("<div class='sec'>Model validation — did the risk numbers actually hold up?</div>",
             unsafe_allow_html=True)
 st.caption(f"A VaR estimate is only worth anything if it's been backtested. We roll a "
@@ -717,8 +715,6 @@ st.markdown("<div class='sec'>Risk contribution — who really drives your risk,
 st.caption("A holding can be a small slice of your capital but a big slice of your risk — or the "
            "reverse. This splits total portfolio risk into how much each holding actually contributes.")
 
-from risk_engine import optimize
-
 _cov_rc = optimize.sample_cov(lr, selected)
 risk_pct = optimize.risk_contribution(_cov_rc, weights)
 
@@ -767,7 +763,6 @@ with st.sidebar:
 
 mu_v = optimize.annualized_mean(lr, selected)
 cov_m = optimize.ledoit_wolf_cov(lr, selected) if use_shrinkage else optimize.sample_cov(lr, selected)
-nA = len(selected)
 
 try:
     w_ms = optimize.max_sharpe_weights(mu_v, cov_m)

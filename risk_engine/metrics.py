@@ -1,6 +1,5 @@
 """Portfolio risk metrics. Pure functions over log-return series."""
 import numpy as np
-import pandas as pd
 from scipy.stats import norm, t as _t
 from risk_engine.config import TRADING_DAYS
 
