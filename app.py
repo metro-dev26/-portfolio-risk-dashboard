@@ -274,26 +274,18 @@ port_val = float(amounts.sum())
 weights = amounts / amounts.sum()
 
 # ── RISK ENGINE (all computed live) ───────────────────────────
+from risk_engine import metrics
+
 ret_sel = lr[selected].dropna()
-pr = (ret_sel * weights).sum(axis=1)          # weighted daily portfolio log-returns
+pr = metrics.portfolio_returns(lr, selected, weights)
 mu, std = pr.mean(), pr.std()
-
-# Historical (non-parametric) — the honest numbers
-h_var = np.percentile(pr, (1 - conf) * 100)   # quantile of returns (negative)
-h_cvar = pr[pr <= h_var].mean()               # expected shortfall beyond VaR
-
-# Gaussian (what standard models assume)
-g_var = mu + std * norm.ppf(1 - conf)
-g_cvar = mu - std * norm.pdf(norm.ppf(1 - conf)) / (1 - conf)
-
-gap = (h_var - g_var) * port_val              # dollars of risk Gaussian misses
-
-# Supporting metrics
-ann_vol = std * np.sqrt(TRADING_DAYS)
-sharpe = (mu / std) * np.sqrt(TRADING_DAYS) if std > 0 else 0.0
-wealth = np.exp(pr.cumsum())
-drawdown = wealth / wealth.cummax() - 1.0
-max_dd = drawdown.min()
+h_var, h_cvar = metrics.historical_var_cvar(pr, conf)
+g_var, g_cvar = metrics.gaussian_var_cvar(pr, conf)
+gap = (h_var - g_var) * port_val
+ann_vol = metrics.annualized_vol(pr)
+sharpe = metrics.sharpe_ratio(pr)
+drawdown = metrics.drawdown_series(pr)
+max_dd = metrics.max_drawdown(pr)
 
 # ── HERO ──────────────────────────────────────────────────────
 st.markdown(f"""
