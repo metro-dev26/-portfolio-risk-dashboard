@@ -21,3 +21,13 @@ def test_list_returns_all_in_order(tmp_path):
     store.save_portfolio("a", {"AAPL": 1, "MSFT": 1}, path=db)
     store.save_portfolio("b", {"MSFT": 2, "JPM": 1}, path=db)
     assert [r["name"] for r in store.list_portfolios(path=db)] == ["a", "b"]
+
+
+def test_env_var_fallback_used_when_path_omitted(tmp_path, monkeypatch):
+    db = tmp_path / "env.db"
+    monkeypatch.setenv("PORTFOLIO_DB", str(db))
+    pid = store.save_portfolio("mine", {"AAPL": 1000, "MSFT": 2000}, path=None)
+    row = store.get_portfolio(pid, path=None)
+    assert row["name"] == "mine"
+    assert row["holdings"] == {"AAPL": 1000, "MSFT": 2000}
+    assert db.exists()

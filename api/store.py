@@ -13,19 +13,17 @@ def _resolve(path):
     return path or os.environ.get("PORTFOLIO_DB", _DEFAULT_DB)
 
 
-def _init(path):
-    with sqlite3.connect(path) as conn:
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS portfolios ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-            "name TEXT NOT NULL, holdings TEXT NOT NULL, created_at TEXT NOT NULL)"
-        )
+_CREATE_TABLE = (
+    "CREATE TABLE IF NOT EXISTS portfolios ("
+    "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+    "name TEXT NOT NULL, holdings TEXT NOT NULL, created_at TEXT NOT NULL)"
+)
 
 
 def save_portfolio(name, holdings, path=None):
     path = _resolve(path)
-    _init(path)
     with sqlite3.connect(path) as conn:
+        conn.execute(_CREATE_TABLE)
         cur = conn.execute(
             "INSERT INTO portfolios (name, holdings, created_at) VALUES (?, ?, ?)",
             (name, json.dumps(holdings), datetime.now(timezone.utc).isoformat()),
@@ -35,8 +33,8 @@ def save_portfolio(name, holdings, path=None):
 
 def get_portfolio(pid, path=None):
     path = _resolve(path)
-    _init(path)
     with sqlite3.connect(path) as conn:
+        conn.execute(_CREATE_TABLE)
         row = conn.execute(
             "SELECT id, name, holdings, created_at FROM portfolios WHERE id = ?", (pid,)
         ).fetchone()
@@ -47,8 +45,8 @@ def get_portfolio(pid, path=None):
 
 def list_portfolios(path=None):
     path = _resolve(path)
-    _init(path)
     with sqlite3.connect(path) as conn:
+        conn.execute(_CREATE_TABLE)
         rows = conn.execute(
             "SELECT id, name, holdings, created_at FROM portfolios ORDER BY id"
         ).fetchall()
