@@ -4,6 +4,14 @@
 **Status:** Approved (design), plan pending
 **Builds on:** Phase 1 (risk engine) + Phase 2 (factor models), both merged to `main` and live.
 
+**Revision (2026-08-21, post-review against real engine code):** folded in 3 fixes
++ 3 upgrades found by reading the actual modules — (1) `analyze_portfolio` forces
+`prefer_live=False` (snapshot only) so no request hits Yahoo; (2) optimizer returns
+structured numbers, not the UI-coupled prose that lives in `app.py`; (3) validation
+requires 2–12 holdings; (4) SQLite fresh-connection-per-call for thread safety;
+(5) `confidence` is an explicit request field (0.90–0.99); (6) self-contained
+`requirements-api.txt` so the Streamlit deploy stays lean.
+
 ## Goal
 
 Expose the tested `risk_engine` as a documented, deployed REST service. The
@@ -50,29 +58,49 @@ is a clean follow-up, explicitly out of scope here.
 ## `risk_engine/analyze.py` (the shared brain)
 
 ```
-analyze_portfolio(holdings: dict[str, float], *, include_backtest: bool = True) -> dict
+analyze_portfolio(holdings: dict[str, float], *, confidence: float = 0.95,
+                  include_backtest: bool = True) -> dict
 ```
 
 - `holdings`: ticker → dollar amount (e.g. `{"AAPL": 20000, "TLT": 10000}`).
-- Loads the committed price snapshot (via existing `data` module), restricts to
-  the requested tickers, computes log returns and dollar weights.
-- Calls the existing pure functions: `metrics` (VaR/CVaR/Sharpe/vol/max-drawdown),
-  `factors` (regression + variance attribution), `optimize` (max-Sharpe /
-  min-variance / suggestion), and — when `include_backtest` — `backtest`
-  (Kupiec + Christoffersen on historical & Gaussian VaR).
-- Returns a plain, JSON-serializable dict (floats/lists/dicts only — no numpy
-  scalars, no pandas objects). Structure:
+- `confidence`: VaR/backtest confidence level (0.90–0.99), passed through to
+  `metrics` and `backtest`.
+- **Loads the SNAPSHOT ONLY** via `data.load_prices(prefer_live=False)`. This is
+  a hard requirement, not a default: `load_prices()` defaults to `prefer_live=True`,
+  which loops every ticker against Yahoo with a 15s timeout each — unacceptable
+  in a request path (would stall or behave nondeterministically per call, and
+  breaks the deployed service's reliability). The engine's committed `prices.csv`
+  is the single runtime source. Then restrict to the requested tickers, compute
+  dollar weights (amount ÷ total).
+- Calls the existing pure functions: `metrics` (historical + Gaussian VaR/CVaR,
+  Sharpe, vol, max-drawdown), `factors` (regression + variance attribution),
+  `optimize` (max-Sharpe / min-variance weights + Sharpe comparison + sector
+  concentration — **numbers, not prose**), and — when `include_backtest` —
+  `backtest_var` (Kupiec + Christoffersen on historical & Gaussian VaR).
+- Returns a plain, JSON-serializable dict (floats/lists/dicts only). **`analyze.py`
+  is the SINGLE conversion point**: the only non-native values from the engine are
+  the optimizer weight `np.ndarray`s, which it converts to `{ticker: float}` maps;
+  `metrics`/`backtest_var`/`factors.betas` already return native Python types
+  (verified). A test asserts the entire returned dict is `json.dumps`-able.
+  Structure (illustrative — exact metric keys pinned to real signatures):
 
 ```
 {
-  "metrics":   {"var": ..., "cvar": ..., "sharpe": ..., "vol": ..., "max_drawdown": ...},
+  "metrics":   {"hist_var": ..., "hist_cvar": ..., "gaussian_var": ...,
+                "sharpe": ..., "annual_vol": ..., "max_drawdown": ...},
   "factors":   {"betas": {...}, "alpha_annual": ..., "r2": ...,
                 "variance_split": {"Mkt-RF": ..., "SMB": ..., "HML": ..., "Idiosyncratic": ...}},
-  "optimizer": {"max_sharpe_weights": {...}, "min_variance_weights": {...}, "suggestion": "..."},
-  "backtest":  {"historical": {"kupiec_p": ..., "christoffersen_p": ..., "verdict": "..."},
+  "optimizer": {"current_sharpe": ..., "max_sharpe_weights": {...}, "max_sharpe_value": ...,
+                "min_variance_weights": {...}, "top_sector": "...", "top_sector_pct": ...},
+  "backtest":  {"historical": {"breaches": ..., "expected": ..., "kupiec_p": ...,
+                               "christoffersen_p": ..., "passed": ...},
                 "gaussian":   {...}}          # key omitted entirely when include_backtest is False
 }
 ```
+
+**No prose in the response.** The plain-English diversification "suggestion" lives
+in `app.py` (UI-coupled, HTML-flavored, ~lines 917–954) and is NOT extracted. A
+JSON API returns data; turning numbers into sentences is the UI's job.
 
 - Pure and independently testable: `test_analyze.py` asserts a known portfolio
   produces sane, finite values and that `include_backtest=False` omits the
@@ -101,16 +129,18 @@ model. No business logic in the transport layer.
 
 ## `api/schemas.py` (pydantic)
 
-- `Holding` or a `holdings: dict[str, float]` map; `AnalyzeRequest {holdings,
+- `AnalyzeRequest {holdings: dict[str, float], confidence: float = 0.95,
   include_backtest: bool = True}`.
 - `AnalyzeResponse` mirrors the `analyze_portfolio` dict (typed sub-models:
   `Metrics`, `Factors`, `Optimizer`, `Backtest` optional).
 - `PortfolioIn {name, holdings}`, `PortfolioOut {id, name, holdings, created_at}`.
 - **Validation → clean 422** (input validation is free credibility):
-  - unknown ticker (outside the engine's known universe) → 422
+  - unknown ticker (outside `config.TICKERS`, the engine's known universe) → 422
   - any amount ≤ 0 → 422
-  - empty holdings → 422
+  - fewer than 2 holdings (empty or single) → 422 — the optimizer and
+    correlations are meaningless below 2, and the app enforces 2–12
   - more than 12 holdings → 422
+  - `confidence` outside 0.90–0.99 → 422
 
 ## `api/store.py` (SQLite, stdlib only)
 
@@ -118,6 +148,11 @@ model. No business logic in the transport layer.
   JSON, created_at TEXT)`.
 - `save_portfolio(name, holdings) -> id`, `get_portfolio(id) -> row | None`,
   `list_portfolios() -> list`.
+- **Fresh connection per call** (`with sqlite3.connect(path) as conn: ...`), not a
+  shared module-level connection. FastAPI runs sync handlers in a threadpool and
+  a sqlite3 connection cannot cross threads — a shared connection throws
+  intermittently under concurrency. Per-call connect is the simple safe pattern
+  at this scale.
 - DB path configurable (default `portfolios.db` at repo root, git-ignored);
   tests use a temp DB via a fixture. No ORM, no migrations.
 
@@ -132,13 +167,22 @@ model. No business logic in the transport layer.
 
 ## Dependencies
 
-- Runtime (add to `requirements.txt`): `fastapi`, `uvicorn[standard]`, `pydantic`.
+- **New `requirements-api.txt`, self-contained for the API deploy**: the engine's
+  numeric deps (`numpy`, `pandas`, `scipy`) PLUS `fastapi`, `uvicorn[standard]`,
+  `pydantic`. Deliberately excludes `streamlit`/`plotly` — the API never renders a
+  UI. Render installs ONLY this file and gets exactly what the API needs.
+- `requirements.txt` (Streamlit UI) is left as-is — it keeps `streamlit`/`plotly`
+  and is NOT polluted with the web framework.
+- **`ci.yml` updated** to install `requirements.txt` + `requirements-api.txt` +
+  `requirements-dev.txt` (CI runs the full suite: engine + Streamlit smoke + API).
 - Dev (add to `requirements-dev.txt`): `httpx` (TestClient transport).
 - No change to the pure engine's dependency profile — the engine still imports
   only numpy/pandas/scipy.
 
 ## Deploy — Render free tier
 
+- Build: `pip install -r requirements-api.txt` (self-contained — includes the
+  engine's numpy/pandas/scipy, excludes streamlit/plotly).
 - Start command: `uvicorn api.main:app --host 0.0.0.0 --port $PORT`.
 - Config committed (`render.yaml` or documented README steps).
 - Live `/docs` URL for the resume; `/health` for the host's checks.
