@@ -30,3 +30,21 @@ def test_analyze_is_json_serializable():
 def test_include_backtest_false_omits_backtest():
     r = analyze_portfolio(HOLDINGS, include_backtest=False)
     assert "backtest" not in r
+
+
+def test_asymmetric_weights_pin_ticker_ordering():
+    """Equal weights can't catch a tickers<->weights<->w_ms zip shuffle. An
+    asymmetric portfolio does: 80% AAPL (Technology) vs 20% TLT (Govt Bonds).
+    If the pairing were shuffled, top_sector / top_sector_pct would be wrong."""
+    r = analyze_portfolio({"AAPL": 80000, "TLT": 20000})
+    assert r["optimizer"]["top_sector"] == "Technology"
+    assert abs(r["optimizer"]["top_sector_pct"] - 0.80) < 1e-9
+    assert set(r["optimizer"]["max_sharpe_weights"]) == {"AAPL", "TLT"}
+
+
+def test_confidence_is_threaded_through():
+    """A higher confidence level must push VaR to a more extreme (more negative)
+    loss quantile — proves `confidence` actually reaches the metric functions."""
+    r95 = analyze_portfolio(HOLDINGS, include_backtest=False)
+    r99 = analyze_portfolio(HOLDINGS, confidence=0.99, include_backtest=False)
+    assert r99["metrics"]["hist_var"] < r95["metrics"]["hist_var"]
