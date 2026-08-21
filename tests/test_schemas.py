@@ -32,3 +32,17 @@ def test_bad_confidence_rejected(conf):
 def test_engine_output_satisfies_response_model():
     out = analyze_portfolio({"AAPL": 20000, "MSFT": 20000, "JPM": 20000})
     AnalyzeResponse(**out)   # ties engine output to the API's response schema
+
+
+def test_response_model_accepts_omitted_backtest():
+    """The Optional backtest path: include_backtest=False omits the key, and the
+    response model must validate cleanly with backtest = None (not require it)."""
+    out = analyze_portfolio(GOOD, include_backtest=False)
+    assert "backtest" not in out
+    assert AnalyzeResponse(**out).backtest is None
+
+
+@pytest.mark.parametrize("conf", [0.90, 0.99])
+def test_confidence_bounds_are_inclusive(conf):
+    """ge/le bounds must be inclusive at the exact edges."""
+    assert AnalyzeRequest(holdings=GOOD, confidence=conf).confidence == conf
