@@ -103,3 +103,24 @@ external API keys.
 ## Tech Stack
 
 Streamlit · NumPy · pandas · SciPy · Plotly. Data source: Yahoo Finance end-of-day prices.
+
+## Risk API (Phase 3)
+
+A FastAPI service exposes the same tested risk engine over HTTP. `POST /analyze`
+accepts a portfolio (ticker → dollar amount) and returns risk metrics, Fama-French
+factor exposure, optimizer targets, and — optionally — VaR backtesting as JSON.
+Portfolios can be saved and reloaded (`/portfolios`). Interactive documentation is
+auto-generated at `/docs` (Swagger UI).
+
+Run locally:
+
+    pip install -r requirements-api.txt
+    uvicorn api.main:app --reload
+    # open http://localhost:8000/docs
+
+**Notes.** Analysis uses the committed price snapshot (deterministic, no live
+fetch in the request path). On the free-tier host the service sleeps when idle,
+so the first request after a pause takes ~30–50s to wake. Saved portfolios use
+SQLite on the host's ephemeral filesystem and do not persist across redeploys —
+the persistence layer demonstrates the capability; a production deployment would
+use a managed database.
