@@ -101,7 +101,7 @@ header { background:transparent !important; }
 """, unsafe_allow_html=True)
 
 # ── PAGE TOGGLE: Dashboard vs Beginner's Guide ────────────────
-mode = st.radio("view", ["📊 Dashboard", "📖 Beginner's Guide"],
+mode = st.radio("view", ["📊 Dashboard", "📖 Beginner's Guide", "🔌 API"],
                 horizontal=True, label_visibility="collapsed")
 
 if mode == "📖 Beginner's Guide":
@@ -184,6 +184,80 @@ if mode == "📖 Beginner's Guide":
         <div class='insight-text'><strong>One honest note.</strong> This is an educational tool for understanding
         how risk is measured — not financial advice. Every number is built from past data, and the past is a
         guide to the future, never a promise. Knowing that limit is itself the most professional habit in finance.</div>
+    </div>""", unsafe_allow_html=True)
+
+    st.stop()
+
+if mode == "🔌 API":
+    st.markdown("""
+    <div class='hero'>
+        <div class='hero-eyebrow'>For developers · a public REST API</div>
+        <div class='hero-title'>This risk engine is also an API</div>
+        <div class='hero-desc'>
+            The same math this dashboard runs is exposed as a public REST API — JSON for other
+            <em>programs</em>, not a webpage. One HTTP call returns risk metrics, factor exposures,
+            and an optimized allocation. Drop it into a script, a notebook, or your own app.
+        </div>
+    </div>""", unsafe_allow_html=True)
+
+    st.markdown("<div class='sec'>What the API does</div>", unsafe_allow_html=True)
+    ENDPOINTS = [
+        ("📊", "POST /analyze",
+         "Send your holdings in dollars — get back VaR &amp; CVaR, Sharpe, max drawdown, "
+         "Fama-French factor betas, VaR backtests, and an optimized max-Sharpe mix. One call, the whole engine."),
+        ("💾", "POST · GET /portfolios",
+         "Save a named portfolio and list your saved ones. <code>GET /portfolios/{id}</code> fetches a single one."),
+        ("❤️", "GET /health",
+         "A liveness check — returns <code>{\"status\":\"ok\"}</code> when the service is awake."),
+    ]
+    for icon, title, body in ENDPOINTS:
+        st.markdown(f"""
+        <div class='insight'>
+            <div class='insight-icon'>{icon}</div>
+            <div class='insight-text'><strong>{title}.</strong> {body}</div>
+        </div>""", unsafe_allow_html=True)
+
+    st.markdown("<div class='sec'>Example request · POST /analyze</div>", unsafe_allow_html=True)
+    st.code('{\n  "holdings": {"AAPL": 10000, "MSFT": 8000, "TLT": 5000}\n}', language="json")
+
+    st.markdown("<div class='sec'>Sample response · computed 2026-08-23</div>", unsafe_allow_html=True)
+    _cols = st.columns(4)
+    _cards = [
+        ("Hist. VaR · 1-day 95%", "-2.12%", "var(--red)", "worst ordinary day"),
+        ("Sharpe", "0.78", "var(--text)", "reward per unit of risk"),
+        ("Max drawdown", "-31.5%", "var(--red)", "worst peak-to-valley fall"),
+        ("Market beta", "0.88", "var(--text)", "Fama-French factor fit"),
+    ]
+    for _col, (_label, _num, _color, _sub) in zip(_cols, _cards):
+        _col.markdown(f"""
+        <div class='big-stat'>
+            <div class='big-stat-label'>{_label}</div>
+            <div class='big-stat-num' style='color:{_color}'>{_num}</div>
+            <div class='big-stat-sub'>{_sub}</div>
+        </div>""", unsafe_allow_html=True)
+
+    st.markdown("""
+    <div class='insight'>
+        <div class='insight-icon'>🧭</div>
+        <div class='insight-text'><strong>What the optimizer computes.</strong> For this input it finds the
+        risk-efficient max-Sharpe mix — <strong>AAPL 71% · MSFT 29% · TLT ~0%</strong> — lifting Sharpe from
+        0.78 to <strong>0.80</strong>. It shows the most efficient blend of <em>these exact holdings</em> and
+        how to read it. It is not a prediction, and not a recommendation to buy.</div>
+    </div>""", unsafe_allow_html=True)
+
+    st.markdown("<div class='sec'>Try it live</div>", unsafe_allow_html=True)
+    st.link_button("Open the interactive API docs →",
+                   "https://marketplug-risk-api.onrender.com/docs")
+    st.markdown("<div class='big-stat-sub' style='margin-top:2px'>"
+                "Free-tier API — the first request may take ~40s to wake the server.</div>",
+                unsafe_allow_html=True)
+
+    st.markdown("""
+    <div class='insight warn'>
+        <div class='insight-icon'>🔍</div>
+        <div class='insight-text'><strong>One honest note.</strong> This is an educational tool for understanding
+        how risk is measured — not financial advice. Every number is built from past market data, and live values
+        drift as the data snapshot updates. The past is a guide, never a promise.</div>
     </div>""", unsafe_allow_html=True)
 
     st.stop()
