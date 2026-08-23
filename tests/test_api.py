@@ -29,6 +29,22 @@ def test_analyze_bad_input_422():
     assert r.status_code == 422
 
 
+import pytest
+
+
+@pytest.mark.parametrize("raw", [
+    '{"holdings": {"AAPL": 1e400, "MSFT": 5000}}',    # inf (JSON overflow)
+    '{"holdings": {"AAPL": -1e400, "MSFT": 5000}}',   # -inf
+    '{"holdings": {"AAPL": NaN, "MSFT": 5000}}',      # NaN
+])
+def test_non_finite_amount_returns_422_not_500(raw):
+    """Over the wire (not the Python-object path), a 422 that echoes an inf/NaN
+    input must still serialize — it previously 500'd in Starlette's JSON encoder."""
+    r = client.post("/analyze", content=raw, headers={"Content-Type": "application/json"})
+    assert r.status_code == 422, f"expected 422, got {r.status_code}: {r.text[:120]}"
+    assert "detail" in r.json()
+
+
 def test_portfolio_crud(tmp_path, monkeypatch):
     monkeypatch.setenv("PORTFOLIO_DB", str(tmp_path / "api.db"))
     created = client.post("/portfolios",
