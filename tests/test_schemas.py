@@ -23,6 +23,19 @@ def test_bad_holdings_rejected(holdings):
         AnalyzeRequest(holdings=holdings)
 
 
+@pytest.mark.parametrize("holdings", [
+    {"AAPL": float("inf"), "MSFT": 20000},    # inf divides into a NaN weight
+    {"AAPL": float("nan"), "MSFT": 20000},    # NaN propagates through the math
+    {"AAPL": float("-inf"), "MSFT": 20000},   # -inf is non-finite and non-positive
+    {"AAPL": 1e13, "MSFT": 20000},            # over the sane maximum
+])
+def test_non_finite_or_oversized_amounts_rejected(holdings):
+    """Security: non-finite amounts previously passed `> 0` and produced a silent
+    all-zeros 200 instead of a clean 422. Reject them at the schema."""
+    with pytest.raises(ValidationError):
+        AnalyzeRequest(holdings=holdings)
+
+
 @pytest.mark.parametrize("conf", [0.5, 0.995, 1.0])
 def test_bad_confidence_rejected(conf):
     with pytest.raises(ValidationError):

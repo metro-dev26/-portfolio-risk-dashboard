@@ -1,5 +1,6 @@
 """pydantic request/response models for the risk API. Validation is free credibility:
 bad input becomes a clean 422 instead of a 500 deep in the engine."""
+import math
 from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
@@ -8,6 +9,10 @@ from risk_engine.config import TICKERS
 
 _UNIVERSE = set(TICKERS)
 
+# A holding above this is nonsensical for a portfolio and only serves to probe
+# for overflow; reject it rather than let a degenerate weight poison the math.
+_MAX_AMOUNT = 1e12
+
 
 def validate_holdings(v):
     if not (2 <= len(v) <= 12):
@@ -15,8 +20,14 @@ def validate_holdings(v):
     for ticker, amount in v.items():
         if ticker not in _UNIVERSE:
             raise ValueError(f"unknown ticker: {ticker}")
+        # inf/NaN pass a naive `> 0` check but divide into a NaN weight, which the
+        # engine would silently return as a zeros analysis. Reject non-finite first.
+        if not math.isfinite(amount):
+            raise ValueError(f"amount for {ticker} must be a finite number")
         if amount <= 0:
             raise ValueError(f"amount for {ticker} must be > 0")
+        if amount > _MAX_AMOUNT:
+            raise ValueError(f"amount for {ticker} exceeds the maximum of {_MAX_AMOUNT:.0f}")
     return v
 
 
