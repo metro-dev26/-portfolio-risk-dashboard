@@ -97,6 +97,15 @@ header { background:transparent !important; }
 .insight-text strong { color:var(--text); }
 .insight.warn { background:rgba(255,179,71,0.05); border-color:rgba(255,179,71,0.2); }
 .insight.danger { background:rgba(255,61,90,0.05); border-color:rgba(255,61,90,0.2); }
+
+/* Dark-theme st.code so it sits in the palette instead of a light box */
+[data-testid="stCode"] { background:transparent !important; }
+[data-testid="stCode"] pre {
+    background:var(--card) !important; border:1px solid var(--border) !important;
+    border-radius:8px !important; }
+[data-testid="stCode"] pre, [data-testid="stCode"] code, [data-testid="stCode"] code * {
+    color:#c9d5e8 !important; background:transparent !important;
+    font-family:'DM Mono',monospace !important; }
 </style>
 """, unsafe_allow_html=True)
 
