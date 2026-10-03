@@ -10,6 +10,7 @@ import re
 import shutil
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import zlib
@@ -277,14 +278,22 @@ def _get_json(url, timeout):
 
 
 def live_meta(quote):
-    kind = {"EQUITY": "stock", "ETF": "etf"}.get(quote.get("quoteType"), "other")
+    quote_type = quote.get("quoteType")
+    kind = {"EQUITY": "stock", "ETF": "etf"}.get(quote_type) if isinstance(quote_type, str) else None
+    kind = kind or "other"
     if kind == "stock":
-        sector, asset_class = quote.get("sector") or "Unknown", "Equity"
+        sector_val = quote.get("sector")
+        sector = sector_val if isinstance(sector_val, str) else "Unknown"
+        asset_class = "Equity"
     elif kind == "etf":
         sector, asset_class = "Fund (holdings unknown)", "Fund"
     else:
-        sector, asset_class = quote.get("typeDisp") or "Other", "Other"
-    name = quote.get("longname") or quote.get("shortname") or quote["symbol"]
+        type_disp = quote.get("typeDisp")
+        sector = type_disp if isinstance(type_disp, str) else "Other"
+        asset_class = "Other"
+    name = quote.get("longname") or quote.get("shortname") or quote.get("symbol", "Unknown")
+    if not isinstance(name, str):
+        name = "Unknown"
     return {"name": name, "sector": sector, "type": kind, "asset_class": asset_class,
             "in_sp500": False, "curated": False}
 
@@ -293,48 +302,67 @@ def fetch_live(sym, *, get_json=_get_json, timeout=8.0, start="2018-01-01"):
     """Price history + metadata for one ticker outside the snapshot. Never raises:
     every outcome is a LiveResult with a reason a person can read."""
     if not isinstance(sym, str):
-        sym = str(sym)
+        return LiveResult(str(sym), "invalid", "not a valid ticker symbol")
     if os.environ.get("MARKETPLUG_NO_LIVE"):
         return LiveResult(sym, "unavailable", "live lookups are disabled in this environment")
-    if not TICKER_RE.fullmatch(sym or ""):
+    if not TICKER_RE.fullmatch(sym):
         return LiveResult(sym, "invalid", "not a valid ticker symbol")
     q = urllib.parse.quote(sym, safe="")
     try:
         p1 = int(dt.datetime.fromisoformat(start).replace(tzinfo=dt.timezone.utc).timestamp())
+    except TypeError:
+        return LiveResult(sym, "unavailable", "invalid start date")
     except (ValueError, OSError, OverflowError):
         return LiveResult(sym, "unavailable", "price history came back in an unexpected format")
     p2 = int(time.time())
     try:
         found = get_json("https://query1.finance.yahoo.com/v1/finance/search"
                          f"?q={q}&quotesCount=5&newsCount=0", timeout)
-        quote = next((x for x in (found or {}).get("quotes", [])
-                      if str(x.get("symbol", "")).upper() == sym), None)
+        if not isinstance(found, dict) or not isinstance(found.get("quotes"), list):
+            return LiveResult(sym, "unavailable", "search results came back in an unexpected format")
+        quote = None
+        for x in found.get("quotes", []):
+            if isinstance(x, dict) and str(x.get("symbol", "")).upper() == sym:
+                quote = x
+                break
         if quote is None:
             return LiveResult(sym, "not_found", "no such ticker on Yahoo Finance")
         payload = get_json(f"https://query1.finance.yahoo.com/v8/finance/chart/{q}"
                            f"?period1={p1}&period2={p2}&interval=1d", timeout)
     except urllib.error.HTTPError as e:
         return LiveResult(sym, "unavailable", f"data source unavailable (HTTP {e.code})")
-    except Exception as e:  # network, HTTP status or malformed JSON
+    except Exception as e:
         return LiveResult(sym, "unavailable", f"data source unavailable ({type(e).__name__})")
     try:
         if not isinstance(payload, dict):
             return LiveResult(sym, "unavailable", "price history came back in an unexpected format")
-        results = ((payload or {}).get("chart") or {}).get("result") or []
+        results = payload.get("chart", {}).get("result", [])
         if not results:
             return LiveResult(sym, "not_found", "no price history on Yahoo Finance")
         r = results[0]
         currency = (r.get("meta") or {}).get("currency")
         if currency != "USD":
             return LiveResult(sym, "non_usd", f"priced in {currency or 'an unknown currency'}, not USD")
-        days = [dt.datetime.fromtimestamp(t, dt.timezone.utc).date() for t in r["timestamp"]]
-        closes = r["indicators"]["adjclose"][0]["adjclose"]
+        timestamp = r.get("timestamp")
+        adjclose_list = r.get("indicators", {}).get("adjclose", [])
+        if not isinstance(timestamp, list) or not isinstance(adjclose_list, list) or not adjclose_list:
+            return LiveResult(sym, "unavailable", "price history came back in an unexpected format")
+        closes = adjclose_list[0].get("adjclose") if isinstance(adjclose_list[0], dict) else adjclose_list[0]
+        if not isinstance(closes, list):
+            return LiveResult(sym, "unavailable", "price history came back in an unexpected format")
+        if len(timestamp) != len(closes):
+            return LiveResult(sym, "unavailable", "price history came back in an unexpected format")
+        days = [dt.datetime.fromtimestamp(t, dt.timezone.utc).date() for t in timestamp]
         s = pd.Series(closes, index=pd.to_datetime(days), name=sym, dtype=float).dropna()
-        s = s[s > 0]
+        s = s[(s > 0) & np.isfinite(s)]
         s = s[~s.index.duplicated(keep="last")]
         s = s.sort_index()
     except (ValueError, OSError, OverflowError, AttributeError, KeyError, IndexError, TypeError):
         return LiveResult(sym, "unavailable", "price history came back in an unexpected format")
+    try:
+        meta = live_meta(quote)
+    except Exception:
+        return LiveResult(sym, "unavailable", "price history came back in an unexpected format")
     if s.empty:
         return LiveResult(sym, "not_found", "no price history on Yahoo Finance")
-    return LiveResult(sym, "ok", "", s, live_meta(quote))
+    return LiveResult(sym, "ok", "", s, meta)

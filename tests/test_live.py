@@ -89,15 +89,11 @@ def test_kill_switch(monkeypatch):
     assert r.status == "unavailable" and "disabled" in r.reason
 
 
-# Fix Round 1 tests
-
-
 def test_fetch_live_with_non_string_sym():
-    """fetch_live never raises; non-string sym should be coerced and validated."""
+    """fetch_live never raises; non-string sym should return invalid without network call."""
     def explode(url, timeout):
         raise AssertionError("network called for invalid sym type")
-    # Use a non-string that becomes an invalid symbol when converted (list -> "[]")
-    r = data.fetch_live([], get_json=explode)
+    r = data.fetch_live(5, get_json=explode)
     assert r.status == "invalid"
 
 
@@ -108,7 +104,6 @@ def test_normalize_ticker_none():
 
 def test_normalize_ticker_nan():
     """normalize_ticker(NaN) should return empty string to fail validation."""
-    import math
     assert data.normalize_ticker(float('nan')) == ""
 
 
@@ -139,7 +134,6 @@ def test_zero_and_negative_closes_dropped():
 
 def test_timestamps_sorted_after_dedup():
     """Out-of-order timestamps should be sorted after dedup."""
-    # Create chart with out-of-order timestamps and duplicate date with last-value dedup
     ts = [1735914600, 1735828200, 1736173800]  # Not in order: 2nd, 1st, 3rd
     out_of_order_chart = {"chart": {"result": [{
         "meta": {"currency": "USD"},
@@ -148,7 +142,6 @@ def test_timestamps_sorted_after_dedup():
     }]}}
     r = data.fetch_live("PLTR", get_json=fake_get(SEARCH_PLTR, out_of_order_chart))
     assert r.status == "ok"
-    # After sorting, should be in ascending order
     assert list(r.prices.index) == sorted(r.prices.index)
 
 
@@ -164,3 +157,53 @@ def test_http_error_includes_status_code():
         raise urllib.error.HTTPError(url, 429, "Too Many Requests", None, None)
     r = data.fetch_live("PLTR", get_json=get_json_http_error)
     assert r.status == "unavailable" and "HTTP 429" in r.reason
+
+
+def test_fetch_live_with_integer_sym_no_network_call():
+    """Integer sym should return invalid without making network call."""
+    def explode(url, timeout):
+        raise AssertionError("network called for integer sym")
+    r = data.fetch_live(5, get_json=explode)
+    assert r.status == "invalid" and r.ticker == "5"
+
+
+def test_live_meta_with_list_quotetype():
+    """live_meta should handle non-string quoteType without raising."""
+    r = data.fetch_live("PLTR", get_json=fake_get(
+        {"quotes": [{"symbol": "PLTR", "quoteType": ["EQUITY"]}]},
+        chart()
+    ))
+    assert r.status == "ok"
+
+
+def test_search_response_as_list():
+    """Search response that is a list should return human-readable error."""
+    r = data.fetch_live("PLTR", get_json=fake_get([]))
+    assert r.status == "unavailable" and "search results came back in an unexpected format" in r.reason
+
+
+def test_scalar_adjclose():
+    """Scalar adjclose instead of list should return unavailable, not raise."""
+    bad_chart = {"chart": {"result": [{
+        "meta": {"currency": "USD"},
+        "timestamp": [1735828200, 1735914600, 1736173800],
+        "indicators": {"adjclose": [{"adjclose": 5.0}]}  # Scalar, not list
+    }]}}
+    r = data.fetch_live("PLTR", get_json=fake_get(SEARCH_PLTR, bad_chart))
+    assert r.status == "unavailable"
+
+
+def test_infinite_closes_dropped():
+    """Infinite closes should be dropped along with non-positive values."""
+    inf_chart = chart(closes=(10.0, float('inf'), 12.0))
+    r = data.fetch_live("PLTR", get_json=fake_get(SEARCH_PLTR, inf_chart))
+    assert r.status == "ok"
+    assert list(r.prices) == [10.0, 12.0]
+
+
+def test_bad_start_parameter_no_network():
+    """Bad start parameter should return unavailable with 'start' in reason, no network call."""
+    def explode(url, timeout):
+        raise AssertionError("network called with bad start")
+    r = data.fetch_live("PLTR", start=None, get_json=explode)
+    assert r.status == "unavailable" and "start" in r.reason
