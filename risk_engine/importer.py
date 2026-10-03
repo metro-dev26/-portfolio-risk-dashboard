@@ -14,7 +14,7 @@ VALUE_HEADERS = ("market value", "current value", "value", "amount")
 QTY_HEADERS = ("quantity", "shares", "qty")
 
 _AMOUNT = re.compile(
-    r"^\(?-?\$?\s*(\d+|\d{1,3}(,\d{3})+)(\.\d+)?\)?$"
+    r"^\(?-?(?:\$ ?)?(\d+|\d{1,3}(,\d{3})+)(\.\d+)?\)?$", re.ASCII
 )
 
 
@@ -38,15 +38,12 @@ def parse_amount(text):
     if not t or not _AMOUNT.match(t):
         return None
 
-    # Check for balanced parentheses (both or neither)
     open_count = t.count("(")
     close_count = t.count(")")
     if open_count != close_count or (open_count > 0 and not (t.startswith("(") and t.endswith(")"))):
         return None
 
-    # Extract sign, handle parentheses
-    is_negative = t.startswith("(") or (t.startswith("-") and not t.startswith("(-"))
-    # Remove all non-digit and non-decimal characters except what we're keeping
+    is_negative = t.startswith("(") or t.startswith("-")
     value_str = re.sub(r"[^\d.]", "", t)
     try:
         value = float(value_str)
@@ -64,7 +61,10 @@ class _Collector:
         if not TICKER_RE.fullmatch(t):
             self.notes.append(f"{where}: '{_truncate(raw_ticker)}' is not a valid ticker — skipped")
         elif amount is None:
-            self.notes.append(f"{where}: no dollar amount for {t} ('{_truncate(raw_amount_text)}') — skipped")
+            if raw_amount_text:
+                self.notes.append(f"{where}: no dollar amount for {t} ('{_truncate(raw_amount_text)}') — skipped")
+            else:
+                self.notes.append(f"{where}: no dollar amount for {t} — skipped")
         elif not math.isfinite(amount) or amount > 1e12:
             self.notes.append(f"{where}: {t} is over the $1,000,000,000,000 limit — skipped")
         elif amount < 0:
@@ -106,7 +106,7 @@ def parse_csv(text, *, last_price=None):
     header is the first row that names a ticker column. `last_price(ticker)` values
     quantity-only files; it may return None when no price is known."""
     try:
-        rows = list(csv.reader(io.StringIO(text.lstrip("﻿"))))
+        rows = list(csv.reader(io.StringIO(text.lstrip("\ufeff"))))
     except csv.Error as e:
         return ParseResult({}, [f"could not read this CSV ({e})"])
 
@@ -131,7 +131,6 @@ def parse_csv(text, *, last_price=None):
             continue
         sym, number = r[t_col].strip(), parse_amount(r[col])
         if v_name is None and number is not None and number > 0:
-            # Validate ticker before calling last_price
             t_norm = normalize_ticker(sym)
             if not TICKER_RE.fullmatch(t_norm):
                 c.notes.append(f"row {i}: '{_truncate(sym)}' is not a valid ticker — skipped")
@@ -139,12 +138,17 @@ def parse_csv(text, *, last_price=None):
             try:
                 price = last_price(t_norm)
             except Exception as e:
+                c.notes.append(f"row {i}: no price for {t_norm} to value its shares ({type(e).__name__}) — skipped")
+                continue
+            try:
+                price_float = float(price) if price is not None else None
+                if price_float is None or not math.isfinite(price_float) or price_float <= 0:
+                    c.notes.append(f"row {i}: no price for {t_norm} to value its shares — skipped")
+                    continue
+                number *= price_float
+            except (TypeError, ValueError):
                 c.notes.append(f"row {i}: no price for {t_norm} to value its shares — skipped")
                 continue
-            if price is None or not math.isfinite(price) or price <= 0:
-                c.notes.append(f"row {i}: no price for {t_norm} to value its shares — skipped")
-                continue
-            number *= price
         c.add(sym, number, f"row {i}", r[col] if col < len(r) else "")
     return c.result()
 
@@ -156,39 +160,28 @@ def from_rows(rows):
     for i, (ticker, amount) in enumerate(rows, 1):
         blank_ticker = ticker is None or str(ticker).strip() == ""
 
-        # Handle amount: try to convert to float, or parse as string
+        # Determine if amount is genuinely blank vs a parse failure
+        genuinely_blank_amount = amount is None or (isinstance(amount, float) and math.isnan(amount))
+
         amount_value = None
         amount_text = ""
-        if amount is not None:
+        if amount is not None and not (isinstance(amount, float) and math.isnan(amount)):
             if isinstance(amount, str):
                 amount_value = parse_amount(amount)
                 amount_text = amount
-            elif isinstance(amount, float):
-                if math.isnan(amount):
-                    amount_value = None
-                else:
-                    amount_value = amount
-            elif hasattr(amount, "item"):  # numpy/pandas scalars
-                try:
-                    val = float(amount.item()) if hasattr(amount, "item") else float(amount)
-                    if math.isnan(val):
-                        amount_value = None
-                    else:
-                        amount_value = val
-                except (TypeError, ValueError):
-                    amount_value = None
             else:
                 try:
                     amount_value = float(amount)
+                    if math.isnan(amount_value):
+                        amount_value = None
                 except (TypeError, ValueError):
                     amount_value = None
 
-        blank_amount = amount_value is None
-
-        if blank_ticker and blank_amount:
+        # Skip silently only if BOTH are genuinely blank
+        if blank_ticker and genuinely_blank_amount:
             continue
 
-        if blank_ticker and not blank_amount:
+        if blank_ticker and not genuinely_blank_amount:
             c.notes.append(f"table row {i}: ticker missing — skipped")
             continue
 

@@ -1,5 +1,6 @@
 import math
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -11,6 +12,7 @@ from risk_engine import importer
     ("$ 1000", 1000.0), ("(1,234.00)", -1234.0), ("-5", -5.0), ("abc", None), ("", None),
     ("1.2.3", None), ("1000,50", None), ("250,5", None), ("1,2", None), ("50 230.00", None),
     ("10 20", None), ("500)", None), ("(500", None), ("1,234,567.89", 1234567.89),
+    ("$  1000", None), ("- 5", None), ("( 5)", None), ("$\t1000", None), ("٣٤", None),
 ])
 def test_parse_amount(text, value):
     assert importer.parse_amount(text) == value
@@ -64,7 +66,7 @@ def test_csv_finds_header_below_account_info_and_skips_junk_rows():
 
 
 def test_csv_handles_byte_order_mark_and_lowercase_headers():
-    r = importer.parse_csv("﻿ticker,amount\nmsft,9000\n")
+    r = importer.parse_csv("\ufeffticker,amount\nmsft,9000\n")
     assert r.holdings == {"MSFT": 9000.0}
 
 
@@ -91,7 +93,7 @@ def test_from_rows_ignores_blank_editor_rows():
     assert r.holdings == {"AAPL": 1000.0, "MSFT": 500.0} and r.notes == []
 
 
-def test_parse_amount_rejects_non_finite():
+def test_parse_paste_rejects_non_finite_amounts():
     r = importer.parse_paste("AAPL " + "9" * 400)
     assert r.holdings == {} and any("limit" in n for n in r.notes)
 
@@ -127,6 +129,16 @@ def test_from_rows_rejects_missing_ticker():
     assert r.holdings == {} and any("ticker missing" in n for n in r.notes)
 
 
+def test_from_rows_rejects_unparseable_string_with_valid_ticker():
+    r = importer.from_rows([("AAPL", "abc")])
+    assert r.holdings == {} and any("dollar amount" in n for n in r.notes)
+
+
+def test_from_rows_rejects_unparseable_string_with_blank_ticker():
+    r = importer.from_rows([(None, "abc")])
+    assert r.holdings == {} and any("ticker missing" in n for n in r.notes)
+
+
 def test_from_rows_rejects_pd_na():
     r = importer.from_rows([("AAPL", pd.NA)])
     assert r.holdings == {} and any("dollar amount" in n for n in r.notes)
@@ -136,10 +148,10 @@ def test_csv_quantity_validates_ticker_before_price_lookup():
     calls = []
     def tracker(t):
         calls.append(t)
-        return None
+        return 200.0
     r = importer.parse_csv("Symbol,Quantity\nTotal Cash,100\nAAPL,10\n", last_price=tracker)
-    assert "Total Cash" not in calls
-    assert "AAPL" in calls or r.holdings == {}
+    assert calls == ["AAPL"]
+    assert r.holdings == {"AAPL": 2000.0}
 
 
 def test_csv_quantity_handles_zero_price():
@@ -159,10 +171,44 @@ def test_csv_quantity_handles_exception_in_last_price():
     assert r.holdings == {} and any("no price" in n for n in r.notes)
 
 
+def test_csv_quantity_handles_pd_na_price():
+    r = importer.parse_csv("Symbol,Quantity\nAAPL,10\n", last_price=lambda t: pd.NA)
+    assert r.holdings == {} and any("no price" in n for n in r.notes)
+
+
+def test_csv_quantity_handles_string_price():
+    r = importer.parse_csv("Symbol,Quantity\nAAPL,10\n", last_price=lambda t: "abc")
+    assert r.holdings == {} and any("no price" in n for n in r.notes)
+
+
+def test_csv_quantity_includes_exception_type_in_note():
+    def broken(t):
+        raise TimeoutError("connection lost")
+    r = importer.parse_csv("Symbol,Quantity\nAAPL,10\n", last_price=broken)
+    assert r.holdings == {}
+    assert any("TimeoutError" in n and "no price" in n for n in r.notes)
+
+
 def test_csv_handles_malformed_csv():
     huge = "x" * 200_000
     r = importer.parse_csv(f"Symbol,Amount\nAAPL,{huge}\n")
     assert r.holdings == {} and any("could not read" in n for n in r.notes)
+
+
+def test_truncation_in_notes():
+    junk_ticker = "x" * 60
+    r = importer.parse_paste(f"{junk_ticker} 100")
+    assert r.holdings == {}
+    note = r.notes[0]
+    assert "…" in note
+    assert junk_ticker not in note
+
+
+def test_echoed_amount_in_notes():
+    r = importer.parse_paste("AAPL lots")
+    assert r.holdings == {}
+    note = r.notes[0]
+    assert "'lots'" in note
 
 
 def test_share_link_round_trip():
