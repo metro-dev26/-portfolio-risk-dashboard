@@ -30,14 +30,11 @@ def _is_blank(value):
     """True if value is None, NaN (any float dtype), or a whitespace/empty string."""
     if value is None:
         return True
-    try:
-        if pd.isna(value):
-            return True
-    except (TypeError, ValueError):
-        pass
-    if isinstance(value, str) and not value.strip():
-        return True
-    return False
+    if not pd.api.types.is_scalar(value):
+        return False
+    if isinstance(value, str):
+        return not value.strip()
+    return bool(pd.isna(value))
 
 
 @dataclass
@@ -54,18 +51,11 @@ def parse_amount(text):
     if not t or not _AMOUNT.match(t):
         return None
 
-    open_count = t.count("(")
-    close_count = t.count(")")
-    if open_count != close_count or (open_count > 0 and not (t.startswith("(") and t.endswith(")"))):
+    if t.count("(") != t.count(")"):
         return None
 
-    is_negative = t.startswith("(") or t.startswith("-")
-    value_str = re.sub(r"[^\d.]", "", t)
-    try:
-        value = float(value_str)
-    except (ValueError, OverflowError):
-        return None
-    return -value if is_negative else value
+    value = float(re.sub(r"[^\d.]", "", t))
+    return -value if t.startswith(("(", "-")) else value
 
 
 class _Collector:
@@ -122,7 +112,7 @@ def parse_csv(text, *, last_price=None):
     header is the first row that names a ticker column. `last_price(ticker)` values
     quantity-only files; it may return None when no price is known."""
     try:
-        rows = list(csv.reader(io.StringIO(text.lstrip("﻿"))))
+        rows = list(csv.reader(io.StringIO(text.lstrip("\ufeff"))))
     except csv.Error as e:
         return ParseResult({}, [f"could not read this CSV ({e})"])
 
@@ -173,11 +163,13 @@ def from_rows(rows):
     an empty line the user added, not a mistake, so it is skipped quietly."""
     c = _Collector()
     for i, (ticker, amount) in enumerate(rows, 1):
-        blank_ticker = _is_blank(ticker)
+        blank_ticker, blank_amount = _is_blank(ticker), _is_blank(amount)
+        if blank_ticker and blank_amount:
+            continue
 
         amount_value = None
         amount_text = ""
-        if not _is_blank(amount):
+        if not blank_amount:
             if isinstance(amount, str):
                 amount_value = parse_amount(amount)
                 amount_text = amount
@@ -186,11 +178,6 @@ def from_rows(rows):
                     amount_value = float(amount)
                 except (TypeError, ValueError, OverflowError):
                     amount_value = None
-
-        blank_amount = _is_blank(amount_value) if amount_value is not None else _is_blank(amount)
-
-        if blank_ticker and blank_amount:
-            continue
 
         if blank_ticker:
             c.notes.append(f"table row {i}: ticker missing — skipped")

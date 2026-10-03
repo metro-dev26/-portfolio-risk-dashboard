@@ -100,7 +100,7 @@ def test_from_rows_ignores_blank_editor_rows():
     ("  ", "  "),
     (None, np.float32("nan")),
 ])
-def test_from_rows_ignores_genuinely_blank_with_pd_na(ticker, amount):
+def test_from_rows_skips_rows_blank_in_every_form(ticker, amount):
     r = importer.from_rows([(ticker, amount)])
     assert r.holdings == {} and r.notes == []
 
@@ -153,6 +153,11 @@ def test_from_rows_rejects_unparseable_string_with_blank_ticker():
 def test_from_rows_rejects_overflow():
     r = importer.from_rows([("AAPL", 10**400)])
     assert r.holdings == {} and len(r.notes) == 1
+
+
+def test_from_rows_notes_non_scalar_amount_instead_of_skipping():
+    r = importer.from_rows([("AAPL", [None])])
+    assert r.holdings == {} and r.notes == ["table row 1: no dollar amount for AAPL — skipped"]
 
 
 def test_from_rows_rejects_pd_na():
