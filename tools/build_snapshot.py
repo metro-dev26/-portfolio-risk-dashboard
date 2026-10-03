@@ -46,13 +46,27 @@ def _http(url, timeout=30):
         return r.read()
 
 
-def parse_sp500(html):
+def _parse_table(html):
+    """-> (rows, skipped, unmapped): the rows parse_sp500 returns, how many table rows
+    had no symbol, and the tickers whose GICS sector has no Yahoo name."""
     # flavor pinned: pandas otherwise retries with html5lib when the table is missing,
     # and the ImportError hides the real problem
-    table =pd.read_html(io.StringIO(html), attrs={"id": "constituents"}, flavor="lxml")[0]
-    return [(str(r["Symbol"]).strip().replace(".", "-"), str(r["Security"]).strip(),
-             GICS_TO_YAHOO.get(str(r["GICS Sector"]).strip(), "Unknown"))
-            for _, r in table.iterrows()]
+    table = pd.read_html(io.StringIO(html), attrs={"id": "constituents"}, flavor="lxml")[0]
+    rows, unmapped, skipped = [], [], 0
+    for _, r in table.iterrows():
+        if pd.isna(r["Symbol"]) or not str(r["Symbol"]).strip():
+            skipped += 1
+            continue
+        ticker = str(r["Symbol"]).strip().replace(".", "-")
+        sector = GICS_TO_YAHOO.get(str(r["GICS Sector"]).strip())
+        if sector is None:
+            unmapped.append(ticker)
+        rows.append((ticker, str(r["Security"]).strip(), sector or "Unknown"))
+    return rows, skipped, sorted(unmapped)
+
+
+def parse_sp500(html):
+    return _parse_table(html)[0]
 
 
 def build_universe(rows, previous):
@@ -117,8 +131,11 @@ def fetch_yf(tickers, start):
     got, failed = {}, {}
     if not tickers:
         return got, failed
-    closes = _close_columns(yf.download(tickers, start=start, auto_adjust=True,
-                                        progress=False, threads=True))
+    try:
+        frame = yf.download(tickers, start=start, auto_adjust=True, progress=False, threads=True)
+    except Exception as e:  # nothing can be built without prices; the cause goes to the log
+        raise SystemExit(f"yfinance download failed ({type(e).__name__}: {e}) — not publishing") from e
+    closes = _close_columns(frame)
     streak = 0
     for t in tickers:
         s = _naive_daily(closes[t].rename(t)) if t in closes.columns else _no_closes()
@@ -232,19 +249,56 @@ def write_bundle(out_dir, prices, universe, factors, report):
 
 
 def _read_prev(prev_dir):
+    """-> (previous bundle or None, how the report describes it)."""
     try:
-        return data.read_bundle(prev_dir, "previous")
-    except data.SnapshotUnavailable:
-        return None
+        return data.read_bundle(prev_dir, "previous"), "used"
+    except data.SnapshotUnavailable as e:
+        if not any(os.path.exists(os.path.join(prev_dir, f)) for f in data.BUNDLE_FILES):
+            return None, "none"
+        return None, f"rejected: {e}"
+
+
+def _fetch_history(mode, prev, universe, tickers, fetch):
+    """-> (prices, failed, repulled). Incremental mode pulls a short overlapping window
+    for stored tickers, then a full history for new and re-scaled ones."""
+    if mode == "full":
+        got, failed = fetch(tickers, START)
+        return pd.DataFrame(got).sort_index(), failed, []
+    stored = prev.prices[[t for t in prev.prices.columns if t in universe]]
+    since = (stored.index.max() - pd.offsets.BDay(OVERLAP_DAYS)).strftime("%Y-%m-%d")
+    got, failed = fetch([t for t in tickers if t in stored.columns], since)
+    prices, repulled = merge_incremental(stored, got)
+    need_full = repulled + [t for t in tickers if t not in stored.columns]
+    if need_full:
+        got_full, failed_full = fetch(need_full, START)
+        failed.update(failed_full)
+        if got_full:
+            prices = pd.concat([prices.drop(columns=[t for t in got_full if t in prices.columns]),
+                                pd.DataFrame(got_full)], axis=1).sort_index()
+    return prices, failed, repulled
+
+
+def _block(out_dir, report, headline, failed, held):
+    """Refuse to publish: leave only blocked_report.json in out_dir and exit with the
+    reason and up to 10 offenders, the benchmark first."""
+    offenders = sorted(set(failed) | set(held), key=lambda t: (t != BENCHMARK, t))
+    lines = [f"  {t}: " + "; ".join(r for r in (failed.get(t), held.get(t)) if r)
+             for t in offenders[:10]]
+    if len(offenders) > 10:
+        lines.append(f"  ... and {len(offenders) - 10} more (see blocked_report.json)")
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, "blocked_report.json"), "w") as f:
+        json.dump({**report, "blocked_reason": headline}, f, indent=1, sort_keys=True)
+    raise SystemExit("\n".join([f"{headline} — not publishing", *lines]))
 
 
 def run(mode, prev_dir, out_dir, *, fetch=fetch_yf, get_html=None, get_factors=fetch_factors):
     get_html = get_html or (lambda: _http(SP500_URL).decode("utf-8"))
-    prev = _read_prev(prev_dir)
+    prev, prev_status = _read_prev(prev_dir)
     if prev is None or prev.prices.empty:
         mode = "full"
     try:
-        rows = parse_sp500(get_html())
+        rows, rows_skipped, unmapped_sectors = _parse_table(get_html())
     except (OSError, ValueError, KeyError) as e:
         raise SystemExit(f"S&P 500 list unavailable ({type(e).__name__}: {e}) — not publishing") from e
     try:
@@ -255,32 +309,36 @@ def run(mode, prev_dir, out_dir, *, fetch=fetch_yf, get_html=None, get_factors=f
     if not tickers:
         raise SystemExit("universe is empty — not publishing")
 
-    repulled = []
-    if mode == "full":
-        got, failed = fetch(tickers, START)
-        prices = pd.DataFrame(got).sort_index()
-    else:
-        stored = prev.prices[[t for t in prev.prices.columns if t in universe]]
-        since = (stored.index.max() - pd.offsets.BDay(OVERLAP_DAYS)).strftime("%Y-%m-%d")
-        got, failed = fetch([t for t in tickers if t in stored.columns], since)
-        prices, repulled = merge_incremental(stored, got)
-        need_full = repulled + [t for t in tickers if t not in stored.columns]
-        if need_full:
-            got_full, failed_full = fetch(need_full, START)
-            failed.update(failed_full)
-            if got_full:
-                prices = pd.concat([prices.drop(columns=[t for t in got_full if t in prices.columns]),
-                                    pd.DataFrame(got_full)], axis=1).sort_index()
+    prices, failed, repulled = _fetch_history(mode, prev, universe, tickers, fetch)
     for t in tickers:
         if t not in prices.columns and t not in failed:
             failed[t] = "no data returned"
+    benchmark_missing = BENCHMARK in failed or BENCHMARK not in prices.columns
+    held = quality_gate(prices)
+    prices = prices.drop(columns=list(held))
 
-    if BENCHMARK in failed or BENCHMARK not in prices.columns:
-        raise SystemExit(f"benchmark {BENCHMARK} failed to download — not publishing")
-    held = {t: r for t, r in quality_gate(prices).items() if t not in failed}
+    as_of = str(prices[BENCHMARK].dropna().index.max().date()) if BENCHMARK in prices.columns else None
+    report = {
+        "as_of": as_of,
+        "built_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "mode": mode,
+        "n_tickers": len(tickers),
+        "failed": failed,
+        "quarantined": held,
+        "repulled": repulled,
+        "universe_fallback": used_prev,
+        "previous_bundle": prev_status,
+        "sp500_rows_skipped": rows_skipped,
+        "unmapped_sectors": unmapped_sectors,
+    }
+    if benchmark_missing:
+        _block(out_dir, report, f"benchmark {BENCHMARK} failed to download", failed, held)
     if BENCHMARK in held:
-        raise SystemExit(f"benchmark {BENCHMARK} held back ({held[BENCHMARK]}) — not publishing")
-    prices = prices.drop(columns=[t for t in held if t in prices.columns])
+        _block(out_dir, report, f"benchmark {BENCHMARK} held back ({held[BENCHMARK]})", failed, held)
+    bad = len(set(failed) | set(held))
+    if bad / len(tickers) > MAX_BAD_FRAC:
+        _block(out_dir, report, f"{bad}/{len(tickers)} tickers failed or held back "
+                                f"({bad / len(tickers):.1%} > {MAX_BAD_FRAC:.0%})", failed, held)
 
     if mode == "full":
         try:
@@ -290,26 +348,12 @@ def run(mode, prev_dir, out_dir, *, fetch=fetch_yf, get_html=None, get_factors=f
     else:
         raw_factors = prev.factors
     factors, factor_rows_dropped = _complete_factors(raw_factors)
+    report["factors_through"] = str(factors.index.max().date())
+    report["factor_rows_dropped"] = factor_rows_dropped
 
-    report = {
-        "as_of": str(prices[BENCHMARK].dropna().index.max().date()),
-        "built_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "mode": mode,
-        "n_tickers": len(tickers),
-        "failed": failed,
-        "quarantined": held,
-        "repulled": repulled,
-        "universe_fallback": used_prev,
-        "factors_through": str(factors.index.max().date()),
-        "factor_rows_dropped": factor_rows_dropped,
-    }
     write_bundle(out_dir, prices, universe, factors, report)
-    bad = len(set(failed) | set(held))
     print(json.dumps({k: report[k] for k in ("as_of", "mode", "n_tickers", "factor_rows_dropped")}
                      | {"failed": len(failed), "held_back": len(held), "repulled": len(repulled)}))
-    if bad / len(tickers) > MAX_BAD_FRAC:
-        raise SystemExit(f"{bad}/{len(tickers)} tickers failed or held back "
-                         f"({bad / len(tickers):.1%} > {MAX_BAD_FRAC:.0%}) — not publishing")
     return report
 
 

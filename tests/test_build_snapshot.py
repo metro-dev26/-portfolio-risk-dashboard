@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import re
 import sys
 import types
 import urllib.error
@@ -13,6 +14,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(__file__)), "tools"))
 import build_snapshot as bs  # noqa: E402
+from risk_engine import data  # noqa: E402
 
 WIKI = """<table id="constituents"><tr><th>Symbol</th><th>Security</th><th>GICS Sector</th></tr>
 <tr><td>AAPL</td><td>Apple Inc.</td><td>Information Technology</td></tr>
@@ -251,9 +253,10 @@ def test_full_run_writes_a_readable_bundle(tmp_path, small_bounds):
     report = bs.run("full", str(tmp_path / "none"), str(tmp_path / "out"),
                     fetch=fetch, get_html=lambda: html, get_factors=lambda: factors)
     assert report["as_of"] == "2026-06-18" and report["failed"] == {}
-    from risk_engine import data
+    assert report["sp500_rows_skipped"] == 0 and report["unmapped_sectors"] == []
     snap = data.read_bundle(str(tmp_path / "out"), "release")
     assert "T0" in snap.prices.columns and "SPY" in snap.universe
+    assert not (tmp_path / "out" / "blocked_report.json").exists()
 
 
 def test_too_many_failures_blocks_publishing(tmp_path, small_bounds):
@@ -350,7 +353,6 @@ def test_factor_rows_with_missing_values_are_dropped_and_counted(tmp_path, small
     factors = _factors([[0.01, 0.0, 0.0, 0.0], [nan, 0.0, 0.0, 0.0], [0.02, 0.0, np.inf, 0.0]])
     report = _run_full(tmp_path, html, fetch, factors)
     assert report["factor_rows_dropped"] == 2 and report["factors_through"] == "2026-05-27"
-    from risk_engine import data
     published = data.read_bundle(str(tmp_path / "out"), "release").factors
     assert len(published) == 1 and not published.isna().any().any()
 
@@ -381,22 +383,28 @@ def test_factor_download_failure_blocks_publishing_with_its_reason(tmp_path, sma
                fetch=fetch, get_html=lambda: html, get_factors=down)
 
 
-def _dated_world(end, rescale_on_incremental=(), calls=None, n=30):
+def _dated_world(end, rescale_on_incremental=(), calls=None, n=30,
+                 fail_incremental=(), fail_full=()):
     """Closes are a function of the date alone, so any window of history agrees with
-    any other, except where a ticker is listed in rescale_on_incremental."""
+    any other, except where a ticker is listed in rescale_on_incremental. Tickers in
+    fail_incremental / fail_full fail on the short pull / the pull from START."""
     html, _, factors = _fake_world(n_good=n)
 
     def fetch(tickers, start):
         if calls is not None:
             calls.append((sorted(tickers), start))
+        incremental = start != bs.START
         idx = pd.bdate_range(start, end)
-        got = {}
+        got, failed = {}, {}
         for t in tickers:
+            if t in (fail_incremental if incremental else fail_full):
+                failed[t] = "no data returned"
+                continue
             values = 50 + 0.01 * (idx - pd.Timestamp("2018-01-01")).days
-            if t in rescale_on_incremental and start != bs.START:
+            if t in rescale_on_incremental and incremental:
                 values = values * 0.98
             got[t] = pd.Series(values, index=idx, name=t)
-        return got, {}
+        return got, failed
 
     return html, fetch, factors
 
@@ -420,8 +428,7 @@ def test_incremental_run_extends_the_previous_bundle(tmp_path, small_bounds):
                     fetch=fetch, get_html=lambda: html, get_factors=must_not_refetch_factors)
     assert report["mode"] == "incremental" and report["as_of"] == "2026-06-19"
     assert report["repulled"] == [] and report["failed"] == {}
-    assert len(calls) == 1 and calls[0][1] > bs.START          # one short fetch, not a full history
-    from risk_engine import data
+    assert len(calls) == 1 and calls[0][1] == "2026-06-03"     # ten business days before the last stored close
     snap = data.read_bundle(str(tmp_path / "out"), "release")
     assert snap.prices.index.max() == pd.Timestamp("2026-06-19")
     assert snap.prices.index.is_unique and snap.prices.index.min() == pd.Timestamp(bs.START)
@@ -438,7 +445,6 @@ def test_incremental_run_repulls_a_rescaled_ticker_and_fetches_new_ones_in_full(
                     fetch=fetch, get_html=lambda: html, get_factors=lambda: factors)
     assert report["repulled"] == ["T3"]
     assert len(calls) == 2 and calls[1] == (["NEWCO", "T3"], bs.START)
-    from risk_engine import data
     snap = data.read_bundle(str(tmp_path / "out"), "release")
     assert snap.prices["NEWCO"].dropna().index.min() == pd.Timestamp(bs.START)
     assert snap.prices["T3"].iloc[-1] == pytest.approx(snap.prices["T4"].iloc[-1])
@@ -459,3 +465,180 @@ def test_report_and_universe_are_plain_json(tmp_path, small_bounds):
     for name in ("refresh_report.json", "universe.json"):
         with open(tmp_path / "out" / name) as f:
             assert isinstance(json.load(f), dict)
+
+
+def _spiking(fetch, tickers):
+    """Wrap a fetch so each listed ticker has one wild close that the next day reverses."""
+    def spiking_fetch(requested, start):
+        got, failed = fetch(requested, start)
+        for t in tickers:
+            if t in got:
+                got[t] = got[t].copy()
+                got[t].iloc[1000] *= 3
+        return got, failed
+    return spiking_fetch
+
+
+def _read_json(path):
+    with open(path) as f:
+        return json.load(f)
+
+
+def test_failed_ticker_with_old_stored_history_is_quarantined_not_published(tmp_path, small_bounds):
+    html, _ = _build_previous(tmp_path)
+    _, fetch, factors = _dated_world("2026-06-26", fail_incremental={"T7"})
+    report = bs.run("incremental", str(tmp_path / "prev"), str(tmp_path / "out"),
+                    fetch=fetch, get_html=lambda: html, get_factors=lambda: factors)
+    assert report["failed"] == {"T7": "no data returned"}
+    assert report["quarantined"] == {"T7": "no new close since 2026-06-17"}
+    snap = data.read_bundle(str(tmp_path / "out"), "release")
+    assert "T7" not in snap.prices.columns and "T7" in snap.quarantined
+    assert snap.as_of == "2026-06-26"
+
+
+def test_repulled_ticker_whose_full_repull_fails_is_quarantined_not_published(tmp_path, small_bounds):
+    html, _ = _build_previous(tmp_path)
+    _, fetch, factors = _dated_world("2026-06-26", rescale_on_incremental={"T3"}, fail_full={"T3"})
+    report = bs.run("incremental", str(tmp_path / "prev"), str(tmp_path / "out"),
+                    fetch=fetch, get_html=lambda: html, get_factors=lambda: factors)
+    assert report["repulled"] == ["T3"] and "T3" in report["failed"]
+    assert "no new close" in report["quarantined"]["T3"]
+    snap = data.read_bundle(str(tmp_path / "out"), "release")
+    assert "T3" not in snap.prices.columns and "T3" in snap.quarantined
+
+
+def test_a_bad_print_is_quarantined_and_left_out_of_the_published_prices(tmp_path, small_bounds):
+    html, fetch, factors = _fake_world()
+    report = _run_full(tmp_path, html, _spiking(fetch, ["T5"]), factors)
+    assert report["failed"] == {} and set(report["quarantined"]) == {"T5"}
+    assert "bad print" in report["quarantined"]["T5"]
+    snap = data.read_bundle(str(tmp_path / "out"), "release")
+    assert "T5" not in snap.prices.columns and "T4" in snap.prices.columns
+    assert "bad print" in snap.quarantined["T5"]
+
+
+def test_a_bad_print_on_the_benchmark_blocks_publishing(tmp_path, small_bounds):
+    html, fetch, factors = _fake_world()
+    with pytest.raises(SystemExit, match="benchmark SPY held back"):
+        _run_full(tmp_path, html, _spiking(fetch, ["SPY"]), factors)
+
+
+def test_quarantine_alone_can_pass_the_two_percent_cap(tmp_path, small_bounds):
+    html, fetch, factors = _fake_world()
+    with pytest.raises(SystemExit, match="not publishing") as exit_info:
+        _run_full(tmp_path, html, _spiking(fetch, ["T1", "T2", "T3", "T4", "T5"]), factors)
+    assert "T1: suspected bad print" in str(exit_info.value)
+
+
+def test_a_fifty_percent_jump_that_reverses_is_a_bad_print_but_thirty_five_is_not():
+    prices = pd.DataFrame({"UP_50": series([100, 100, 150, 100, 100, 100, 100]),
+                           "UP_35": series([100, 100, 135, 100, 100, 100, 100])})
+    assert set(bs.quality_gate(prices)) == {"UP_50"}
+
+
+def test_the_next_close_must_undo_half_the_jump_to_make_a_bad_print():
+    prices = pd.DataFrame({"UNDOES_60": series([100, 100, 200, 140, 140, 140, 140]),
+                           "UNDOES_40": series([100, 100, 200, 160, 160, 160, 160])})
+    assert set(bs.quality_gate(prices)) == {"UNDOES_60"}
+
+
+def test_a_blocked_build_publishes_nothing_but_a_report_naming_the_offenders(tmp_path, small_bounds):
+    html, fetch, factors = _fake_world(n_good=100, n_fail=5)
+    with pytest.raises(SystemExit, match="not publishing") as exit_info:
+        _run_full(tmp_path, html, fetch, factors)
+    out = tmp_path / "out"
+    assert os.listdir(out) == ["blocked_report.json"]
+    blocked = _read_json(out / "blocked_report.json")
+    assert set(blocked["failed"]) == {f"T{i}" for i in range(100, 105)}
+    assert "tickers failed or held back" in blocked["blocked_reason"]
+    assert all(f"T{i}: no data returned" in str(exit_info.value) for i in range(100, 105))
+    with pytest.raises(data.SnapshotUnavailable):
+        data.read_bundle(str(out), "release")
+
+
+def test_a_blocked_build_names_at_most_ten_offenders(tmp_path, small_bounds):
+    html, fetch, factors = _fake_world(n_good=100, n_fail=15)
+    with pytest.raises(SystemExit) as exit_info:
+        _run_full(tmp_path, html, fetch, factors)
+    message = str(exit_info.value)
+    assert len(re.findall(r"^\s*T\d+: no data returned", message, re.M)) == 10
+    assert "5 more" in message
+
+
+def test_a_failed_benchmark_blocks_with_a_report_and_no_bundle(tmp_path, small_bounds):
+    html, fetch, factors = _fake_world(benchmark_fails=True)
+    with pytest.raises(SystemExit, match="SPY: no data returned"):
+        _run_full(tmp_path, html, fetch, factors)
+    out = tmp_path / "out"
+    assert os.listdir(out) == ["blocked_report.json"]
+    blocked = _read_json(out / "blocked_report.json")
+    assert blocked["blocked_reason"].startswith("benchmark SPY failed to download")
+    assert blocked["as_of"] is None
+
+
+def test_a_benchmark_bad_print_blocks_with_a_report_and_no_bundle(tmp_path, small_bounds):
+    html, fetch, factors = _fake_world()
+    with pytest.raises(SystemExit, match="SPY: suspected bad print"):
+        _run_full(tmp_path, html, _spiking(fetch, ["SPY"]), factors)
+    out = tmp_path / "out"
+    assert os.listdir(out) == ["blocked_report.json"]
+    assert "held back" in _read_json(out / "blocked_report.json")["blocked_reason"]
+
+
+def test_report_records_that_there_was_no_previous_bundle(tmp_path, small_bounds):
+    html, fetch, factors = _fake_world()
+    assert _run_full(tmp_path, html, fetch, factors)["previous_bundle"] == "none"
+
+
+def test_report_records_that_the_previous_bundle_was_used(tmp_path, small_bounds):
+    html, _ = _build_previous(tmp_path)
+    _, fetch, factors = _dated_world("2026-06-19")
+    report = bs.run("incremental", str(tmp_path / "prev"), str(tmp_path / "out"),
+                    fetch=fetch, get_html=lambda: html, get_factors=lambda: factors)
+    assert report["previous_bundle"] == "used"
+
+
+def test_report_gives_the_reason_a_previous_bundle_was_rejected(tmp_path, small_bounds):
+    html, _ = _build_previous(tmp_path)
+    (tmp_path / "prev" / "prices.csv.gz").write_bytes(b"not a gzip file")
+    _, fetch, factors = _dated_world("2026-06-19")
+    report = bs.run("incremental", str(tmp_path / "prev"), str(tmp_path / "out"),
+                    fetch=fetch, get_html=lambda: html, get_factors=lambda: factors)
+    assert report["mode"] == "full"
+    assert report["previous_bundle"].startswith("rejected:")
+    assert "prices.csv.gz" in report["previous_bundle"]
+
+
+def test_fetch_yf_turns_a_download_exception_into_a_reasoned_exit(monkeypatch):
+    module = types.ModuleType("yfinance")
+
+    def refuse(*args, **kwargs):
+        raise ConnectionError("proxy refused")
+
+    module.download = refuse
+    monkeypatch.setitem(sys.modules, "yfinance", module)
+    with pytest.raises(SystemExit, match="yfinance download failed.*ConnectionError.*proxy refused"):
+        bs.fetch_yf(["A"], "2026-01-01")
+
+
+def test_parse_skips_rows_without_a_symbol():
+    html = WIKI.replace("</table>", "<tr><td></td><td>Ghost Corp</td><td>Financials</td></tr></table>")
+    assert [r[0] for r in bs.parse_sp500(html)] == ["AAPL", "BRK-B"]
+
+
+def test_run_counts_skipped_rows_and_lists_unmapped_sectors(tmp_path, small_bounds):
+    html, fetch, factors = _fake_world()
+    html = html.replace("</table>",
+                        "<tr><td></td><td>Ghost Corp</td><td>Financials</td></tr>"
+                        "<tr><td>XYZ</td><td>Coin Corp</td><td>Digital Assets</td></tr></table>")
+    report = _run_full(tmp_path, html, fetch, factors)
+    assert report["sp500_rows_skipped"] == 1 and report["unmapped_sectors"] == ["XYZ"]
+    snap = data.read_bundle(str(tmp_path / "out"), "release")
+    assert snap.universe["XYZ"]["sector"] == "Unknown" and "nan" not in snap.universe
+
+
+def test_refresh_requirements_are_all_pinned():
+    path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "requirements-refresh.txt")
+    with open(path) as f:
+        lines = [line.strip() for line in f if line.strip()]
+    assert lines and all("==" in line for line in lines)
