@@ -6,9 +6,11 @@ import datetime as dt
 import gzip
 import json
 import os
+import re
 import shutil
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 import zlib
 from dataclasses import dataclass
@@ -244,3 +246,82 @@ def load_prices(prefer_live=False):
     prices = snap.prices.ffill().dropna()
     lr = np.log(prices / prices.shift(1)).dropna()
     return prices, lr, f"{snap.source} snapshot · {snap.as_of}"
+
+
+TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-^=]{0,10}$")
+_CLASS_SHARE = re.compile(r"^[A-Z]{1,5}\.[A-Z]$")
+
+
+def normalize_ticker(raw):
+    """Upper-case, trim, and turn class-share dots into Yahoo's dashes (BRK.B -> BRK-B).
+    Exchange suffixes like .NS keep their dot."""
+    t = str(raw).strip().upper()
+    return t.replace(".", "-") if _CLASS_SHARE.match(t) else t
+
+
+@dataclass(frozen=True)
+class LiveResult:
+    ticker: str
+    status: str               # "ok" | "invalid" | "not_found" | "non_usd" | "unavailable"
+    reason: str = ""
+    prices: pd.Series | None = None
+    meta: dict | None = None
+
+
+def _get_json(url, timeout):
+    req = urllib.request.Request(url, headers=_UA)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read())
+
+
+def live_meta(quote):
+    kind = {"EQUITY": "stock", "ETF": "etf"}.get(quote.get("quoteType"), "other")
+    if kind == "stock":
+        sector, asset_class = quote.get("sector") or "Unknown", "Equity"
+    elif kind == "etf":
+        sector, asset_class = "Fund (holdings unknown)", "Fund"
+    else:
+        sector, asset_class = quote.get("typeDisp") or "Other", "Other"
+    name = quote.get("longname") or quote.get("shortname") or quote["symbol"]
+    return {"name": name, "sector": sector, "type": kind, "asset_class": asset_class,
+            "in_sp500": False, "curated": False}
+
+
+def fetch_live(sym, *, get_json=_get_json, timeout=8.0, start="2018-01-01"):
+    """Price history + metadata for one ticker outside the snapshot. Never raises:
+    every outcome is a LiveResult with a reason a person can read."""
+    if os.environ.get("MARKETPLUG_NO_LIVE"):
+        return LiveResult(sym, "unavailable", "live lookups are disabled in this environment")
+    if not TICKER_RE.fullmatch(sym or ""):
+        return LiveResult(sym, "invalid", "not a valid ticker symbol")
+    q = urllib.parse.quote(sym, safe="")
+    p1 = int(dt.datetime.fromisoformat(start).replace(tzinfo=dt.timezone.utc).timestamp())
+    p2 = int(time.time())
+    try:
+        found = get_json("https://query1.finance.yahoo.com/v1/finance/search"
+                         f"?q={q}&quotesCount=5&newsCount=0", timeout)
+        quote = next((x for x in (found or {}).get("quotes", [])
+                      if str(x.get("symbol", "")).upper() == sym), None)
+        if quote is None:
+            return LiveResult(sym, "not_found", "no such ticker on Yahoo Finance")
+        payload = get_json(f"https://query1.finance.yahoo.com/v8/finance/chart/{q}"
+                           f"?period1={p1}&period2={p2}&interval=1d", timeout)
+    except Exception as e:  # network, HTTP status or malformed JSON
+        return LiveResult(sym, "unavailable", f"data source unavailable ({type(e).__name__})")
+    results = ((payload or {}).get("chart") or {}).get("result") or []
+    if not results:
+        return LiveResult(sym, "not_found", "no price history on Yahoo Finance")
+    r = results[0]
+    currency = (r.get("meta") or {}).get("currency")
+    if currency != "USD":
+        return LiveResult(sym, "non_usd", f"priced in {currency or 'an unknown currency'}, not USD")
+    try:
+        days = [dt.datetime.fromtimestamp(t, dt.timezone.utc).date() for t in r["timestamp"]]
+        closes = r["indicators"]["adjclose"][0]["adjclose"]
+    except (KeyError, IndexError, TypeError):
+        return LiveResult(sym, "unavailable", "price history came back in an unexpected format")
+    s = pd.Series(closes, index=pd.to_datetime(days), name=sym, dtype=float).dropna()
+    s = s[~s.index.duplicated(keep="last")]
+    if s.empty:
+        return LiveResult(sym, "not_found", "no price history on Yahoo Finance")
+    return LiveResult(sym, "ok", "", s, live_meta(quote))
