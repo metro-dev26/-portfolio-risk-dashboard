@@ -193,3 +193,56 @@ def test_corrupt_file_parsing_raises_unavailable(monkeypatch, tmp_path):
     msg = str(exc_info.value)
     assert "network down" in msg  # release failure reason
     assert "unreadable" in msg or "universe.json" in msg  # fallback failure reason
+
+
+def test_corrupt_gzip_deflate_body_not_poison_cache(monkeypatch, tmp_path):
+    """Cached prices.csv.gz with valid header but corrupt deflate body → re-download, not fallback."""
+    monkeypatch.delenv("MARKETPLUG_DATA_DIR")
+    cache = tmp_path / "cache"
+
+    # Load 1: good release
+    snap1 = data.load_snapshot(release_url="https://x/rel", cache_dir=str(cache),
+                               fetch=_release_fetcher(FIXTURE, []), use_memo=False)
+    assert snap1.source == "release"
+
+    # Corrupt the cached prices.csv.gz: keep header but corrupt deflate body
+    cached_prices = cache / "prices.csv.gz"
+    original = cached_prices.read_bytes()
+    # Corrupt bytes 20-30 (middle of deflate stream)
+    corrupted = original[:20] + b"\x00\xFF" * 5 + original[30:]
+    cached_prices.write_bytes(corrupted)
+
+    # Load 2: fetch is working, but cache is corrupt → must re-download (not fallback)
+    calls = []
+    snap2 = data.load_snapshot(release_url="https://x/rel", cache_dir=str(cache),
+                               fetch=_release_fetcher(FIXTURE, calls), use_memo=False)
+    assert snap2.source == "release"
+    assert len(calls) == 4  # All 4 files re-downloaded
+
+
+def test_read_bundle_on_corrupt_gzip_deflate(tmp_path):
+    """read_bundle on corrupt deflate body → SnapshotUnavailable, not zlib.error."""
+    import gzip
+    bad_dir = tmp_path / "bad"
+    shutil.copytree(FIXTURE, bad_dir)
+
+    # Corrupt deflate body while keeping gzip header
+    cached_prices = bad_dir / "prices.csv.gz"
+    original = cached_prices.read_bytes()
+    corrupted = original[:20] + b"\x00\xFF" * 5 + original[30:]
+    cached_prices.write_bytes(corrupted)
+
+    # read_bundle must raise SnapshotUnavailable, not zlib.error
+    with pytest.raises(data.SnapshotUnavailable, match="unreadable"):
+        data.read_bundle(str(bad_dir), "test")
+
+
+def test_read_bundle_on_non_dict_report(tmp_path):
+    """read_bundle with refresh_report.json = 5 → SnapshotUnavailable, not TypeError."""
+    bad_dir = tmp_path / "bad"
+    shutil.copytree(FIXTURE, bad_dir)
+    (bad_dir / "refresh_report.json").write_text("5")
+
+    # read_bundle must raise SnapshotUnavailable, not TypeError
+    with pytest.raises(data.SnapshotUnavailable, match="unreadable|dict"):
+        data.read_bundle(str(bad_dir), "test")

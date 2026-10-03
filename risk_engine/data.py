@@ -6,9 +6,11 @@ import datetime as dt
 import gzip
 import json
 import os
+import shutil
 import tempfile
 import time
 import urllib.request
+import zlib
 from dataclasses import dataclass
 
 import numpy as np
@@ -58,7 +60,7 @@ def read_bundle(directory, source):
 
     try:
         prices = pd.read_csv(os.path.join(directory, "prices.csv.gz"), index_col=0, parse_dates=True)
-    except (OSError, gzip.BadGzipFile, EOFError, ValueError) as e:
+    except (OSError, gzip.BadGzipFile, EOFError, ValueError, zlib.error) as e:
         raise SnapshotUnavailable(
             f"{directory}: prices.csv.gz is unreadable ({type(e).__name__}: {e})") from e
 
@@ -81,6 +83,10 @@ def read_bundle(directory, source):
     except (OSError, json.JSONDecodeError, ValueError) as e:
         raise SnapshotUnavailable(
             f"{directory}: refresh_report.json is unreadable ({type(e).__name__}: {e})") from e
+
+    if not isinstance(report, dict):
+        raise SnapshotUnavailable(
+            f"{directory}: refresh_report.json must be a dict, got {type(report).__name__}")
 
     if "as_of" not in report:
         raise SnapshotUnavailable(f"{directory}: refresh_report.json missing 'as_of'")
@@ -128,8 +134,9 @@ def _from_release(release_url, cache_dir, fetch):
     if _bundle_complete(cache_dir):
         try:
             with open(cached_report) as f:
-                cached_as_of = json.load(f).get("as_of")
-            if cached_as_of == remote_as_of:
+                cached_report_data = json.load(f)
+            # Tolerate non-dict reports (treat as a cache miss)
+            if isinstance(cached_report_data, dict) and cached_report_data.get("as_of") == remote_as_of:
                 # Try to read the cached bundle; if it fails, fall through to redownload
                 try:
                     return read_bundle(cache_dir, "cache")
@@ -139,7 +146,8 @@ def _from_release(release_url, cache_dir, fetch):
             pass  # Cache report unreadable; redownload
 
     # Download all files to a staging directory, validate, then move to cache
-    staging = tempfile.mkdtemp(prefix="marketplug-staging-")
+    os.makedirs(cache_dir, exist_ok=True)
+    staging = tempfile.mkdtemp(prefix=".staging-", dir=cache_dir)
     try:
         for name in ("prices.csv.gz", "universe.json", "factors.csv"):
             _atomic_write(os.path.join(staging, name), fetch(f"{release_url}/{name}"))
@@ -149,17 +157,14 @@ def _from_release(release_url, cache_dir, fetch):
         snap = read_bundle(staging, "release")
 
         # Move staging files to cache
-        os.makedirs(cache_dir, exist_ok=True)
         for name in BUNDLE_FILES:
             src = os.path.join(staging, name)
             dst = os.path.join(cache_dir, name)
-            if os.path.exists(src):
-                os.replace(src, dst)
+            os.replace(src, dst)
 
         return snap
     finally:
         # Clean up staging directory
-        import shutil
         try:
             shutil.rmtree(staging)
         except OSError:
