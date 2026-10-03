@@ -1,0 +1,69 @@
+name: refresh-data
+on:
+  schedule:
+    - cron: "0 23 * * 1-5"   # weekdays after the US close: incremental
+    - cron: "0 23 * * 0"     # Sunday: full rebuild + Fama-French factors
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "incremental or full"
+        type: choice
+        options: [incremental, full]
+        required: true
+        default: "full"
+permissions:
+  contents: write   # create/upload releases
+  actions: write    # re-enable this workflow (beats the 60-day inactivity disable)
+concurrency:
+  group: refresh-data
+  cancel-in-progress: false
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements-refresh.txt
+      - name: Choose mode
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "mode=${{ inputs.mode }}" >> "$GITHUB_OUTPUT"
+          elif [ "$(date -u +%u)" = "7" ]; then
+            echo "mode=full" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=incremental" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Download previous bundle
+        run: gh release download data-latest -D prev || echo "no previous bundle; building in full"
+      - name: Build
+        run: python tools/build_snapshot.py --mode "${{ steps.mode.outputs.mode }}" --prev-dir prev --out-dir out
+      - name: Keep the blocked report from a refused build
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: blocked-build-${{ github.run_id }}
+          path: out/
+          retention-days: 14
+          if-no-files-found: ignore
+      - name: Publish dated release and move data-latest
+        run: |
+          AS_OF=$(python -c "import json; print(json.load(open('out/refresh_report.json'))['as_of'])")
+          TAG="data-${AS_OF}"
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --title "Data ${AS_OF}" --notes "Automated data bundle" --prerelease
+          gh release upload "$TAG" out/prices.csv.gz out/universe.json out/factors.csv out/refresh_report.json --clobber
+          gh release view data-latest >/dev/null 2>&1 || \
+            gh release create data-latest --title "Data (latest)" --notes "Always the newest bundle" --prerelease
+          # Data first, report last: a reader who sees the new report also gets the new data.
+          gh release upload data-latest out/prices.csv.gz out/universe.json out/factors.csv --clobber
+          gh release upload data-latest out/refresh_report.json --clobber
+      - name: Prune releases older than 14 days
+        run: python tools/prune_releases.py --keep-days 14
+      - name: Keep the schedule alive
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/refresh-data.yml/enable"
