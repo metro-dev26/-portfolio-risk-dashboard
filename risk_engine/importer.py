@@ -7,6 +7,8 @@ import math
 import re
 from dataclasses import dataclass, field
 
+import pandas as pd
+
 from risk_engine.data import TICKER_RE, normalize_ticker
 
 TICKER_HEADERS = ("symbol", "ticker")
@@ -22,6 +24,20 @@ def _truncate(text, max_len=40):
     """Truncate text to max_len, appending … if cut."""
     text = str(text)
     return text if len(text) <= max_len else text[:max_len] + "…"
+
+
+def _is_blank(value):
+    """True if value is None, NaN (any float dtype), or a whitespace/empty string."""
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, str) and not value.strip():
+        return True
+    return False
 
 
 @dataclass
@@ -47,7 +63,7 @@ def parse_amount(text):
     value_str = re.sub(r"[^\d.]", "", t)
     try:
         value = float(value_str)
-    except ValueError:
+    except (ValueError, OverflowError):
         return None
     return -value if is_negative else value
 
@@ -106,7 +122,7 @@ def parse_csv(text, *, last_price=None):
     header is the first row that names a ticker column. `last_price(ticker)` values
     quantity-only files; it may return None when no price is known."""
     try:
-        rows = list(csv.reader(io.StringIO(text.lstrip("\ufeff"))))
+        rows = list(csv.reader(io.StringIO(text.lstrip("﻿"))))
     except csv.Error as e:
         return ParseResult({}, [f"could not read this CSV ({e})"])
 
@@ -142,13 +158,12 @@ def parse_csv(text, *, last_price=None):
                 continue
             try:
                 price_float = float(price) if price is not None else None
-                if price_float is None or not math.isfinite(price_float) or price_float <= 0:
-                    c.notes.append(f"row {i}: no price for {t_norm} to value its shares — skipped")
-                    continue
-                number *= price_float
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
+                price_float = None
+            if price_float is None or not math.isfinite(price_float) or price_float <= 0:
                 c.notes.append(f"row {i}: no price for {t_norm} to value its shares — skipped")
                 continue
+            number *= price_float
         c.add(sym, number, f"row {i}", r[col] if col < len(r) else "")
     return c.result()
 
@@ -158,34 +173,30 @@ def from_rows(rows):
     an empty line the user added, not a mistake, so it is skipped quietly."""
     c = _Collector()
     for i, (ticker, amount) in enumerate(rows, 1):
-        blank_ticker = ticker is None or str(ticker).strip() == ""
-
-        # Determine if amount is genuinely blank vs a parse failure
-        genuinely_blank_amount = amount is None or (isinstance(amount, float) and math.isnan(amount))
+        blank_ticker = _is_blank(ticker)
 
         amount_value = None
         amount_text = ""
-        if amount is not None and not (isinstance(amount, float) and math.isnan(amount)):
+        if not _is_blank(amount):
             if isinstance(amount, str):
                 amount_value = parse_amount(amount)
                 amount_text = amount
             else:
                 try:
                     amount_value = float(amount)
-                    if math.isnan(amount_value):
-                        amount_value = None
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
                     amount_value = None
 
-        # Skip silently only if BOTH are genuinely blank
-        if blank_ticker and genuinely_blank_amount:
+        blank_amount = _is_blank(amount_value) if amount_value is not None else _is_blank(amount)
+
+        if blank_ticker and blank_amount:
             continue
 
-        if blank_ticker and not genuinely_blank_amount:
+        if blank_ticker:
             c.notes.append(f"table row {i}: ticker missing — skipped")
             continue
 
-        c.add("" if blank_ticker else ticker, amount_value, f"table row {i}", amount_text)
+        c.add(ticker, amount_value, f"table row {i}", amount_text)
     return c.result()
 
 

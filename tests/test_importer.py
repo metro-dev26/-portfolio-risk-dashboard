@@ -93,6 +93,18 @@ def test_from_rows_ignores_blank_editor_rows():
     assert r.holdings == {"AAPL": 1000.0, "MSFT": 500.0} and r.notes == []
 
 
+@pytest.mark.parametrize("ticker,amount", [
+    ("", pd.NA),
+    (None, pd.NA),
+    ("", ""),
+    ("  ", "  "),
+    (None, np.float32("nan")),
+])
+def test_from_rows_ignores_genuinely_blank_with_pd_na(ticker, amount):
+    r = importer.from_rows([(ticker, amount)])
+    assert r.holdings == {} and r.notes == []
+
+
 def test_parse_paste_rejects_non_finite_amounts():
     r = importer.parse_paste("AAPL " + "9" * 400)
     assert r.holdings == {} and any("limit" in n for n in r.notes)
@@ -109,9 +121,13 @@ def test_from_rows_rejects_nan():
 
 
 def test_from_rows_rejects_float32_nan():
-    import numpy as np
     r = importer.from_rows([("AAPL", np.float32("nan"))])
     assert r.holdings == {} and len(r.notes) == 1
+
+
+def test_from_rows_no_empty_parens_in_note():
+    r = importer.from_rows([("AAPL", None)])
+    assert r.notes == ["table row 1: no dollar amount for AAPL — skipped"]
 
 
 def test_from_rows_handles_string_amounts():
@@ -129,14 +145,14 @@ def test_from_rows_rejects_missing_ticker():
     assert r.holdings == {} and any("ticker missing" in n for n in r.notes)
 
 
-def test_from_rows_rejects_unparseable_string_with_valid_ticker():
-    r = importer.from_rows([("AAPL", "abc")])
-    assert r.holdings == {} and any("dollar amount" in n for n in r.notes)
-
-
 def test_from_rows_rejects_unparseable_string_with_blank_ticker():
     r = importer.from_rows([(None, "abc")])
     assert r.holdings == {} and any("ticker missing" in n for n in r.notes)
+
+
+def test_from_rows_rejects_overflow():
+    r = importer.from_rows([("AAPL", 10**400)])
+    assert r.holdings == {} and len(r.notes) == 1
 
 
 def test_from_rows_rejects_pd_na():
