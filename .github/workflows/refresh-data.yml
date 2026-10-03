@@ -21,38 +21,54 @@ jobs:
   refresh:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    env:
-      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - run: pip install -r requirements-refresh.txt
       - name: Choose mode
         id: mode
+        env:
+          EVENT: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
+          DISPATCH_MODE: ${{ inputs.mode }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "mode=${{ inputs.mode }}" >> "$GITHUB_OUTPUT"
-          elif [ "$(date -u +%u)" = "7" ]; then
-            echo "mode=full" >> "$GITHUB_OUTPUT"
-          else
-            echo "mode=incremental" >> "$GITHUB_OUTPUT"
-          fi
+          # The Sunday pattern must match the Sunday cron entry under on.schedule.
+          case "$EVENT:$SCHEDULE" in
+            workflow_dispatch:*) mode="$DISPATCH_MODE" ;;
+            schedule:"0 23 * * 0") mode=full ;;
+            *) mode=incremental ;;
+          esac
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
       - name: Download previous bundle
-        run: gh release download data-latest -D prev || echo "no previous bundle; building in full"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download data-latest -D prev || echo "::warning::no previous bundle downloaded; building in full"
       - name: Build
         run: python tools/build_snapshot.py --mode "${{ steps.mode.outputs.mode }}" --prev-dir prev --out-dir out
       - name: Keep the blocked report from a refused build
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: blocked-build-${{ github.run_id }}
+          name: blocked-build-${{ github.run_id }}-${{ github.run_attempt }}
           path: out/
           retention-days: 14
           if-no-files-found: ignore
-      - name: Publish dated release and move data-latest
+      - name: Publish dated release and update data-latest
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          retry() {
+            for attempt in 1 2 3; do
+              "$@" && return 0
+              echo "::warning::attempt $attempt of 3 failed: $*"
+              [ "$attempt" -lt 3 ] && sleep 10
+            done
+            return 1
+          }
           AS_OF=$(python -c "import json; print(json.load(open('out/refresh_report.json'))['as_of'])")
           TAG="data-${AS_OF}"
           gh release view "$TAG" >/dev/null 2>&1 || \
@@ -60,10 +76,16 @@ jobs:
           gh release upload "$TAG" out/prices.csv.gz out/universe.json out/factors.csv out/refresh_report.json --clobber
           gh release view data-latest >/dev/null 2>&1 || \
             gh release create data-latest --title "Data (latest)" --notes "Always the newest bundle" --prerelease
-          # Data first, report last: a reader who sees the new report also gets the new data.
-          gh release upload data-latest out/prices.csv.gz out/universe.json out/factors.csv --clobber
-          gh release upload data-latest out/refresh_report.json --clobber
+          # Data first, report last: a reader who sees the new report also gets the new data,
+          # and a failed data upload stops the step before the report is touched.
+          retry gh release upload data-latest out/prices.csv.gz out/universe.json out/factors.csv --clobber || exit 1
+          retry gh release upload data-latest out/refresh_report.json --clobber || exit 1
       - name: Prune releases older than 14 days
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: python tools/prune_releases.py --keep-days 14
       - name: Keep the schedule alive
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/refresh-data.yml/enable"
