@@ -248,13 +248,15 @@ def load_prices(prefer_live=False):
     return prices, lr, f"{snap.source} snapshot · {snap.as_of}"
 
 
-TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-^=]{0,10}$")
+TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-^=]{0,10}\Z")
 _CLASS_SHARE = re.compile(r"^[A-Z]{1,5}\.[A-Z]$")
 
 
 def normalize_ticker(raw):
     """Upper-case, trim, and turn class-share dots into Yahoo's dashes (BRK.B -> BRK-B).
     Exchange suffixes like .NS keep their dot."""
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        return ""
     t = str(raw).strip().upper()
     return t.replace(".", "-") if _CLASS_SHARE.match(t) else t
 
@@ -290,12 +292,17 @@ def live_meta(quote):
 def fetch_live(sym, *, get_json=_get_json, timeout=8.0, start="2018-01-01"):
     """Price history + metadata for one ticker outside the snapshot. Never raises:
     every outcome is a LiveResult with a reason a person can read."""
+    if not isinstance(sym, str):
+        sym = str(sym)
     if os.environ.get("MARKETPLUG_NO_LIVE"):
         return LiveResult(sym, "unavailable", "live lookups are disabled in this environment")
     if not TICKER_RE.fullmatch(sym or ""):
         return LiveResult(sym, "invalid", "not a valid ticker symbol")
     q = urllib.parse.quote(sym, safe="")
-    p1 = int(dt.datetime.fromisoformat(start).replace(tzinfo=dt.timezone.utc).timestamp())
+    try:
+        p1 = int(dt.datetime.fromisoformat(start).replace(tzinfo=dt.timezone.utc).timestamp())
+    except (ValueError, OSError, OverflowError):
+        return LiveResult(sym, "unavailable", "price history came back in an unexpected format")
     p2 = int(time.time())
     try:
         found = get_json("https://query1.finance.yahoo.com/v1/finance/search"
@@ -306,22 +313,28 @@ def fetch_live(sym, *, get_json=_get_json, timeout=8.0, start="2018-01-01"):
             return LiveResult(sym, "not_found", "no such ticker on Yahoo Finance")
         payload = get_json(f"https://query1.finance.yahoo.com/v8/finance/chart/{q}"
                            f"?period1={p1}&period2={p2}&interval=1d", timeout)
+    except urllib.error.HTTPError as e:
+        return LiveResult(sym, "unavailable", f"data source unavailable (HTTP {e.code})")
     except Exception as e:  # network, HTTP status or malformed JSON
         return LiveResult(sym, "unavailable", f"data source unavailable ({type(e).__name__})")
-    results = ((payload or {}).get("chart") or {}).get("result") or []
-    if not results:
-        return LiveResult(sym, "not_found", "no price history on Yahoo Finance")
-    r = results[0]
-    currency = (r.get("meta") or {}).get("currency")
-    if currency != "USD":
-        return LiveResult(sym, "non_usd", f"priced in {currency or 'an unknown currency'}, not USD")
     try:
+        if not isinstance(payload, dict):
+            return LiveResult(sym, "unavailable", "price history came back in an unexpected format")
+        results = ((payload or {}).get("chart") or {}).get("result") or []
+        if not results:
+            return LiveResult(sym, "not_found", "no price history on Yahoo Finance")
+        r = results[0]
+        currency = (r.get("meta") or {}).get("currency")
+        if currency != "USD":
+            return LiveResult(sym, "non_usd", f"priced in {currency or 'an unknown currency'}, not USD")
         days = [dt.datetime.fromtimestamp(t, dt.timezone.utc).date() for t in r["timestamp"]]
         closes = r["indicators"]["adjclose"][0]["adjclose"]
-    except (KeyError, IndexError, TypeError):
+        s = pd.Series(closes, index=pd.to_datetime(days), name=sym, dtype=float).dropna()
+        s = s[s > 0]
+        s = s[~s.index.duplicated(keep="last")]
+        s = s.sort_index()
+    except (ValueError, OSError, OverflowError, AttributeError, KeyError, IndexError, TypeError):
         return LiveResult(sym, "unavailable", "price history came back in an unexpected format")
-    s = pd.Series(closes, index=pd.to_datetime(days), name=sym, dtype=float).dropna()
-    s = s[~s.index.duplicated(keep="last")]
     if s.empty:
         return LiveResult(sym, "not_found", "no price history on Yahoo Finance")
     return LiveResult(sym, "ok", "", s, live_meta(quote))

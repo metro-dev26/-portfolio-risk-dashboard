@@ -1,4 +1,5 @@
 import pytest
+import urllib.error
 
 from risk_engine import data
 
@@ -86,3 +87,80 @@ def test_kill_switch(monkeypatch):
     monkeypatch.setenv("MARKETPLUG_NO_LIVE", "1")
     r = data.fetch_live("PLTR", get_json=fake_get(SEARCH_PLTR, chart()))
     assert r.status == "unavailable" and "disabled" in r.reason
+
+
+# Fix Round 1 tests
+
+
+def test_fetch_live_with_non_string_sym():
+    """fetch_live never raises; non-string sym should be coerced and validated."""
+    def explode(url, timeout):
+        raise AssertionError("network called for invalid sym type")
+    # Use a non-string that becomes an invalid symbol when converted (list -> "[]")
+    r = data.fetch_live([], get_json=explode)
+    assert r.status == "invalid"
+
+
+def test_normalize_ticker_none():
+    """normalize_ticker(None) should return empty string to fail validation."""
+    assert data.normalize_ticker(None) == ""
+
+
+def test_normalize_ticker_nan():
+    """normalize_ticker(NaN) should return empty string to fail validation."""
+    import math
+    assert data.normalize_ticker(float('nan')) == ""
+
+
+def test_fetch_live_length_mismatch_chart():
+    """Mismatched timestamp and adjclose lengths should be unavailable, not raise."""
+    bad_chart = {"chart": {"result": [{
+        "meta": {"currency": "USD"},
+        "timestamp": [1735828200, 1735914600],  # 2 timestamps
+        "indicators": {"adjclose": [{"adjclose": [10.0, 11.0, 12.0]}]}  # 3 closes
+    }]}}
+    r = data.fetch_live("PLTR", get_json=fake_get(SEARCH_PLTR, bad_chart))
+    assert r.status == "unavailable" and "unexpected format" in r.reason
+
+
+def test_fetch_live_list_shaped_json():
+    """JSON body that is a list [] instead of dict should be unavailable, not raise."""
+    r = data.fetch_live("PLTR", get_json=fake_get(SEARCH_PLTR, []))
+    assert r.status == "unavailable" and "unexpected format" in r.reason
+
+
+def test_zero_and_negative_closes_dropped():
+    """Zero and negative closes should be dropped along with NaN."""
+    good_chart = chart(closes=(10.0, 0.0, -1.0, 12.0))
+    r = data.fetch_live("PLTR", get_json=fake_get(SEARCH_PLTR, good_chart))
+    assert r.status == "ok"
+    assert list(r.prices) == [10.0, 12.0]
+
+
+def test_timestamps_sorted_after_dedup():
+    """Out-of-order timestamps should be sorted after dedup."""
+    # Create chart with out-of-order timestamps and duplicate date with last-value dedup
+    ts = [1735914600, 1735828200, 1736173800]  # Not in order: 2nd, 1st, 3rd
+    out_of_order_chart = {"chart": {"result": [{
+        "meta": {"currency": "USD"},
+        "timestamp": ts,
+        "indicators": {"adjclose": [{"adjclose": [11.0, 10.0, 12.0]}]}
+    }]}}
+    r = data.fetch_live("PLTR", get_json=fake_get(SEARCH_PLTR, out_of_order_chart))
+    assert r.status == "ok"
+    # After sorting, should be in ascending order
+    assert list(r.prices.index) == sorted(r.prices.index)
+
+
+def test_ticker_regex_rejects_newline():
+    """TICKER_RE should reject symbols with trailing newline."""
+    assert data.TICKER_RE.match("AAPL\n") is None
+    assert data.TICKER_RE.match("AAPL") is not None
+
+
+def test_http_error_includes_status_code():
+    """HTTPError exceptions should include the status code in the reason."""
+    def get_json_http_error(url, timeout):
+        raise urllib.error.HTTPError(url, 429, "Too Many Requests", None, None)
+    r = data.fetch_live("PLTR", get_json=get_json_http_error)
+    assert r.status == "unavailable" and "HTTP 429" in r.reason
