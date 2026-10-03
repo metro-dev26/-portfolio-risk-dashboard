@@ -193,3 +193,16 @@ timeouts. The stored-XSS note on the saved-portfolio `name` field still stands.
 
 ETF look-through, effective holdings, single-stock check (2) · volatility/regime
 model, clustering (3) · diversification page (4) · panic replay (5) · LLM layer (6).
+
+## Step 0 results (2026-10-03)
+
+| Probe | Result |
+|---|---|
+| GitHub Actions, urllib chart + search (AAPL, MSFT, VOO, PLTR, BRK-B) | HTTP 200 on all 10 requests |
+| GitHub Actions, yfinance 1.7.0 batch download of all 503 S&P 500 constituents since 2018 | 0 of 503 empty · 30.8 s · 2,200 rows |
+| Size of that price table as gzip CSV (6 decimals) | 5,200,949 bytes (≈5.0 MiB) |
+| Live Streamlit app (cold start), hero label | "Yahoo Finance · live" → urllib reaches Yahoo from Streamlit Cloud |
+
+**Decisions:** the refresh job uses yfinance (pinned 1.7.0), with urllib as its per-ticker retry; the app's live lookup keeps urllib (no new runtime dependency). Render is still unprobed and is checked in the post-deploy matrix.
+
+**Caveat:** one run on one day. It shows the path works today, not that Yahoo will never throttle cloud hosts; the stale-data banner and bundled fallback are the guard for that.
