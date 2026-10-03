@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from risk_engine import data, portfolio
 from tests.conftest import HOLDINGS
@@ -43,12 +44,14 @@ def test_live_cap_and_time_budget():
     many = {f"ZZ{i}": 100.0 for i in range(7)}
     r = portfolio.resolve_holdings(many, s, live_fetch=ok_live(base), max_live=5)
     assert len(r.tickers) == 5
-    assert all("max 5" in x.reason for x in r.rejected) and len(r.rejected) == 2
+    assert [x.ticker for x in r.rejected] == ["ZZ5", "ZZ6"]
+    assert all("max 5" in x.reason for x in r.rejected)
 
     ticks = iter([0.0, 0.0, 11.0, 11.0, 11.0])
     r2 = portfolio.resolve_holdings({"ZZ1": 1, "ZZ2": 1}, s, live_fetch=ok_live(base),
                                     budget_s=10.0, clock=lambda: next(ticks))
-    assert r2.tickers == ["ZZ1"] and "time budget" in r2.rejected[0].reason
+    assert r2.tickers == ["ZZ1"]
+    assert r2.rejected[0].ticker == "ZZ2" and "time budget" in r2.rejected[0].reason
 
 
 def test_quarantined_ticker_is_rejected_not_looked_up():
@@ -98,6 +101,7 @@ def test_short_and_too_short_windows():
                                       live_fetch=ok_live(_young_listing(s, "2026-01-02")))
     w2 = portfolio.portfolio_window(tiny.prices, tiny.tickers)
     assert w2.status == "too_short" and "NEWCO" in w2.message
+    assert "trading days of shared history" in w2.message
 
 
 def test_benchmark_is_added_once_even_when_held():
@@ -242,4 +246,95 @@ def test_interleaved_dates_with_no_overlap_are_refused_not_crashed():
                            "EVEN": pd.Series(20.0, index=idx[1::2])})
     w = portfolio.portfolio_window(prices, ["ODD", "EVEN"])
     assert w.status == "too_short" and w.n_days == 0 and w.returns.empty
-    assert "never line up" in w.message
+    assert "These holdings' price dates never line up" in w.message
+
+
+def _synthetic(n_rows, names=("A", "B"), seed=0):
+    idx = pd.bdate_range("2020-01-01", periods=n_rows)
+    rng = np.random.default_rng(seed)
+    steps = rng.normal(0.0, 0.01, (n_rows, len(names)))
+    return pd.DataFrame(100.0 * np.exp(steps.cumsum(axis=0)), index=idx, columns=list(names))
+
+
+@pytest.mark.parametrize("rows,status,n_days", [
+    (505, "ok", 504), (504, "short", 503), (253, "short", 252), (252, "too_short", 251)])
+def test_window_status_changes_exactly_at_the_thresholds(rows, status, n_days):
+    w = portfolio.portfolio_window(_synthetic(rows), ["A", "B"])
+    assert (w.n_days, w.status) == (n_days, status)
+    assert len(w.returns) == n_days
+
+
+def test_a_gap_is_never_filled_it_becomes_one_multi_day_return_for_every_holding():
+    p = _synthetic(300)
+    gap, after, before = p.index[100], p.index[101], p.index[99]
+    gappy = p.copy()
+    gappy.loc[gap, "B"] = np.nan
+    w = portfolio.portfolio_window(gappy, ["A", "B"])
+    assert gap not in w.returns.index and len(w.returns) == 298
+    for t in ("A", "B"):
+        assert w.returns.loc[after, t] == pytest.approx(np.log(p.loc[after, t] / p.loc[before, t]))
+
+
+def test_benchmark_missing_a_day_drops_that_day_instead_of_inventing_a_zero_return():
+    p = _synthetic(300, names=("A", "B", "SPY"))
+    gap, after, before = p.index[100], p.index[101], p.index[99]
+    bench = p["SPY"].drop(index=gap)
+    w = portfolio.portfolio_window(p[["A", "B"]], ["A", "B"], benchmark=bench)
+    assert gap not in w.returns.index and (w.returns["SPY"] != 0).all()
+    assert w.returns.loc[after, "SPY"] == pytest.approx(np.log(p.loc[after, "SPY"]
+                                                               / p.loc[before, "SPY"]))
+    assert w.returns.loc[after, "A"] == pytest.approx(np.log(p.loc[after, "A"]
+                                                             / p.loc[before, "A"]))
+
+
+def test_benchmark_listed_later_than_the_holdings_sets_the_window_start():
+    p = _synthetic(300, names=("A", "B", "SPY"))
+    late = p["SPY"].iloc[50:]
+    w = portfolio.portfolio_window(p[["A", "B"]], ["A", "B"], benchmark=late)
+    assert w.start == late.index[0] and w.returns["SPY"].notna().all()
+    assert w.returns.notna().all().all() and len(w.returns) == 249
+
+
+def test_unnamed_benchmark_is_called_spy():
+    p = _synthetic(300, names=("A", "B", "X"))
+    w = portfolio.portfolio_window(p[["A", "B"]], ["A", "B"],
+                                   benchmark=p["X"].rename(None))
+    assert list(w.returns.columns) == ["A", "B", "SPY"]
+
+
+def _ending(as_of, bdays_before, rows=300):
+    end = pd.Timestamp(np.busday_offset(as_of, -bdays_before))
+    return pd.Series(100.0, index=pd.bdate_range(end=end, periods=rows))
+
+
+def test_live_series_that_stopped_trading_is_rejected_as_possibly_delisted():
+    s = snap()
+    stale = _ending(s.as_of, 20)
+    r = portfolio.resolve_holdings({"AAPL": 1, "OLDCO": 5}, s, live_fetch=ok_live(stale))
+    assert r.tickers == ["AAPL"] and "OLDCO" not in r.prices.columns
+    assert r.rejected == [portfolio.Rejection(
+        "OLDCO", 5, f"no recent prices (last close {stale.index[-1].date()}) — possibly delisted")]
+
+
+def test_live_series_is_current_up_to_five_business_days_behind_the_snapshot():
+    s = snap()
+    fresh = portfolio.resolve_holdings({"EDGE": 1}, s, live_fetch=ok_live(_ending(s.as_of, 5)))
+    assert fresh.tickers == ["EDGE"]
+    behind = portfolio.resolve_holdings({"EDGE": 1}, s, live_fetch=ok_live(_ending(s.as_of, 6)))
+    assert behind.tickers == [] and "no recent prices" in behind.rejected[0].reason
+
+
+def test_malformed_tickers_are_rejected_without_using_a_live_lookup():
+    s = snap()
+    calls = []
+    fetch = ok_live(_ending(s.as_of, 0))
+
+    def counted(sym):
+        calls.append(sym)
+        return fetch(sym)
+    unknown = [f"ZZ{i}" for i in range(5)]
+    holdings = {"AAPL": 1, "": 1, "A/B": 1, **{t: 1 for t in unknown}}
+    r = portfolio.resolve_holdings(holdings, s, live_fetch=counted, max_live=5)
+    assert calls == unknown and r.tickers == ["AAPL"] + unknown
+    assert [(x.ticker, x.reason) for x in r.rejected] == [
+        ("", "not a valid ticker symbol"), ("A/B", "not a valid ticker symbol")]

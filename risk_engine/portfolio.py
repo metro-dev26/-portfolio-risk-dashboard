@@ -8,8 +8,12 @@ import numpy as np
 import pandas as pd
 
 from risk_engine import data
-from risk_engine.config import (CRISES, LIVE_BUDGET_API_S, LIVE_MAX_API,
+from risk_engine.config import (BENCHMARK, CRISES, LIVE_BUDGET_API_S, LIVE_MAX_API,
                                 WINDOW_MIN_DAYS, WINDOW_OK_DAYS)
+
+# A live series that stopped this many business days before the snapshot is
+# treated as delisted rather than analysed on an old, frozen price.
+LIVE_STALE_BUSINESS_DAYS = 5
 
 
 @dataclass(frozen=True)
@@ -34,6 +38,13 @@ class Resolution:
 
 def _has_prices(series):
     return series is not None and series.first_valid_index() is not None
+
+
+def _stale_reason(series, as_of):
+    last = series.last_valid_index()
+    if int(np.busday_count(last.date(), as_of)) > LIVE_STALE_BUSINESS_DAYS:
+        return f"no recent prices (last close {last.date()}) — possibly delisted"
+    return None
 
 
 def resolve_holdings(holdings, snap, *, live_fetch=None, max_live=LIVE_MAX_API,
@@ -61,6 +72,9 @@ def resolve_holdings(holdings, snap, *, live_fetch=None, max_live=LIVE_MAX_API,
             accepted[t], meta[t], source[t] = amount, snap.universe[t], "snapshot"
             cols[t] = snap.prices[t]
             continue
+        if not data.TICKER_RE.fullmatch(t):
+            rejected[t] = Rejection(t, amount, "not a valid ticker symbol")
+            continue
         if n_live >= max_live:
             rejected[t] = Rejection(t, amount, f"too many tickers outside the dataset "
                                                f"in one request (max {max_live})")
@@ -76,6 +90,10 @@ def resolve_holdings(holdings, snap, *, live_fetch=None, max_live=LIVE_MAX_API,
         if not _has_prices(res.prices):
             rejected[t] = Rejection(t, amount, "no price history on Yahoo Finance")
             continue
+        stale = _stale_reason(res.prices, snap.as_of)
+        if stale:
+            rejected[t] = Rejection(t, amount, stale)
+            continue
         accepted[t], meta[t], source[t] = amount, res.meta, "live"
         cols[t] = res.prices
     prices = pd.DataFrame(cols).sort_index() if cols else pd.DataFrame()
@@ -85,12 +103,12 @@ def resolve_holdings(holdings, snap, *, live_fetch=None, max_live=LIVE_MAX_API,
 @dataclass
 class Window:
     returns: pd.DataFrame  # log returns over the window; holdings (+ benchmark), no gaps
-    start: pd.Timestamp    # NaT when no date has a price for every holding
+    start: pd.Timestamp    # NaT when no date has a price for every column
     end: pd.Timestamp
-    first_dates: dict      # ticker -> first date with a price; absent for a ticker with none
+    first_dates: dict      # column -> first date with a price; absent for one with none
     n_days: int
     status: str            # "ok" | "short" | "too_short"
-    limiting: str          # the holding whose listing date sets the start
+    limiting: str          # the column whose first price date sets the start
     message: str
 
 
@@ -105,11 +123,11 @@ def _no_history_message(bare):
             f"nothing to analyse. Remove {'it' if one else 'them'} and try again.")
 
 
-def _no_overlap_message(sub, limiting, listed):
-    ended = [t for t in sub.columns if sub[t].last_valid_index() < listed]
+def _no_overlap_message(frame, limiting, listed):
+    ended = [c for c in frame.columns if frame[c].last_valid_index() < listed]
     why = (f"{', '.join(ended)} stopped trading before {limiting} was listed ({listed.date()})."
-           if ended else f"Their price dates never line up after {limiting} was listed "
-                         f"({listed.date()}).")
+           if ended else f"These holdings' price dates never line up after {limiting} was "
+                         f"listed ({listed.date()}).")
     return f"No trading day has a price for every holding. {why} Remove one of them to continue."
 
 
@@ -120,33 +138,41 @@ def _grade(n, limiting, since):
         return "short", (f"Results use {n} trading days (since {since}), limited by "
                          f"{limiting}'s listing date. With under two years of shared history, "
                          f"VaR is less reliable.")
-    return "too_short", (f"{limiting} has only {n} trading days of history (since {since}). That "
-                         f"is under a year, too little for these risk numbers to mean anything. "
-                         f"Remove {limiting} or analyse it once it has a year of prices.")
+    return "too_short", (f"{limiting} has only {n} trading days of shared history (since "
+                         f"{since}). That is under a year, too little for these risk numbers "
+                         f"to mean anything. Remove {limiting} or analyse it once it has a "
+                         f"year of prices.")
+
+
+def _with_benchmark(held, benchmark):
+    """The benchmark joins the alignment as one more column, unless it is held."""
+    if benchmark is None:
+        return held
+    name = BENCHMARK if benchmark.name is None else benchmark.name
+    if name in held.columns:
+        return held
+    return pd.concat([held, benchmark.rename(name)], axis=1).sort_index()
 
 
 def portfolio_window(prices, tickers, benchmark=None):
     tickers = list(dict.fromkeys(tickers))
-    extra = [benchmark.name] if benchmark is not None and benchmark.name not in tickers else []
+    frame = _with_benchmark(prices[tickers], benchmark)
+    columns = list(frame.columns)
     if not tickers:
-        return _refusal(tickers + extra, {}, "", "There are no holdings to analyse.")
-    sub = prices[tickers]
-    first = {t: sub[t].first_valid_index() for t in tickers}
-    bare = [t for t in tickers if first[t] is None]
+        return _refusal(columns, {}, "", "There are no holdings to analyse.")
+    first = {c: frame[c].first_valid_index() for c in columns}
+    bare = [c for c in columns if first[c] is None]
     if bare:
-        known = {t: d for t, d in first.items() if d is not None}
-        return _refusal(tickers + extra, known, bare[0], _no_history_message(bare))
-    limiting = max(tickers, key=lambda t: first[t])
-    # Align on dates where every holding has a price, THEN difference: a gap is
+        known = {c: d for c, d in first.items() if d is not None}
+        return _refusal(columns, known, bare[0], _no_history_message(bare))
+    limiting = max(columns, key=lambda c: first[c])
+    # Align on dates where every column has a price, THEN difference: a gap is
     # never filled with an invented price, and a multi-day move lands on one row.
-    aligned = sub.loc[first[limiting]:].dropna()
+    aligned = frame.loc[first[limiting]:].dropna()
     if aligned.empty:
-        return _refusal(tickers + extra, first, limiting,
-                        _no_overlap_message(sub, limiting, first[limiting]))
+        return _refusal(columns, first, limiting,
+                        _no_overlap_message(frame, limiting, first[limiting]))
     returns = np.log(aligned / aligned.shift(1)).iloc[1:].copy()
-    if extra:
-        b = benchmark.reindex(aligned.index).ffill()
-        returns[benchmark.name] = np.log(b / b.shift(1)).iloc[1:]
     n = len(returns)
     status, message = _grade(n, limiting, aligned.index[0].date())
     return Window(returns, aligned.index[0], aligned.index[-1], first, n, status, limiting, message)
