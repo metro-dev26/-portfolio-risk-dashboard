@@ -4,13 +4,13 @@ import numpy as np
 import pandas as pd
 
 from risk_engine.config import TRADING_DAYS
+from risk_engine.data import load_snapshot
 
 FACTOR_NAMES = ["Mkt-RF", "SMB", "HML"]
 
 
 def load_factors():
     """Return the factor DataFrame (DatetimeIndex; columns Mkt-RF, SMB, HML, RF; decimals)."""
-    from risk_engine.data import load_snapshot
     return load_snapshot().factors
 
 

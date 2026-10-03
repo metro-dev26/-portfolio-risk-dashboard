@@ -3,6 +3,7 @@ published as a release, cached on local disk, with a dated bundle in the repo as
 the fallback when the download fails. Pure — no UI."""
 import dataclasses
 import datetime as dt
+import gzip
 import json
 import os
 import tempfile
@@ -18,7 +19,9 @@ from risk_engine.config import DATA_RELEASE_URL, STALE_BUSINESS_DAYS
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FALLBACK_DIR = os.path.join(_REPO, "data", "fallback")
 BUNDLE_FILES = ("prices.csv.gz", "universe.json", "factors.csv", "refresh_report.json")
+FALLBACK_RETRY_S = 300
 _UA = {"User-Agent": "Mozilla/5.0"}
+_CACHE_DIR = None
 
 
 class SnapshotUnavailable(RuntimeError):
@@ -48,15 +51,40 @@ def _bundle_complete(directory):
 
 
 def read_bundle(directory, source):
+    """Read a bundle from disk. Raises SnapshotUnavailable on missing or corrupt files."""
     missing = [f for f in BUNDLE_FILES if not os.path.exists(os.path.join(directory, f))]
     if missing:
         raise SnapshotUnavailable(f"{directory} is missing {', '.join(missing)}")
-    prices = pd.read_csv(os.path.join(directory, "prices.csv.gz"), index_col=0, parse_dates=True)
-    factors = pd.read_csv(os.path.join(directory, "factors.csv"), index_col=0, parse_dates=True)
-    with open(os.path.join(directory, "universe.json")) as f:
-        universe = json.load(f)
-    with open(os.path.join(directory, "refresh_report.json")) as f:
-        report = json.load(f)
+
+    try:
+        prices = pd.read_csv(os.path.join(directory, "prices.csv.gz"), index_col=0, parse_dates=True)
+    except (OSError, gzip.BadGzipFile, EOFError, ValueError) as e:
+        raise SnapshotUnavailable(
+            f"{directory}: prices.csv.gz is unreadable ({type(e).__name__}: {e})") from e
+
+    try:
+        factors = pd.read_csv(os.path.join(directory, "factors.csv"), index_col=0, parse_dates=True)
+    except (OSError, EOFError, ValueError) as e:
+        raise SnapshotUnavailable(
+            f"{directory}: factors.csv is unreadable ({type(e).__name__}: {e})") from e
+
+    try:
+        with open(os.path.join(directory, "universe.json")) as f:
+            universe = json.load(f)
+    except (OSError, json.JSONDecodeError, ValueError) as e:
+        raise SnapshotUnavailable(
+            f"{directory}: universe.json is unreadable ({type(e).__name__}: {e})") from e
+
+    try:
+        with open(os.path.join(directory, "refresh_report.json")) as f:
+            report = json.load(f)
+    except (OSError, json.JSONDecodeError, ValueError) as e:
+        raise SnapshotUnavailable(
+            f"{directory}: refresh_report.json is unreadable ({type(e).__name__}: {e})") from e
+
+    if "as_of" not in report:
+        raise SnapshotUnavailable(f"{directory}: refresh_report.json missing 'as_of'")
+
     return Snapshot(prices.sort_index(), universe, factors, report, source)
 
 
@@ -66,51 +94,124 @@ def _download(url, timeout=30):
         return r.read()
 
 
+def _get_default_cache_dir():
+    """Return the default private cache directory, creating it once."""
+    global _CACHE_DIR
+    if _CACHE_DIR is None:
+        _CACHE_DIR = tempfile.mkdtemp(prefix="marketplug-cache-")
+    return _CACHE_DIR
+
+
 def _atomic_write(path, payload):
-    tmp = path + ".part"
-    with open(tmp, "wb") as f:
-        f.write(payload)
-    os.replace(tmp, path)
+    """Write payload atomically using tempfile.mkstemp."""
+    dirname = os.path.dirname(path)
+    os.makedirs(dirname, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=dirname)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(payload)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _from_release(release_url, cache_dir, fetch):
+    """Download and cache a release bundle. Validates before committing to cache."""
     report_bytes = fetch(f"{release_url}/refresh_report.json")
     remote_as_of = json.loads(report_bytes)["as_of"]
+
     cached_report = os.path.join(cache_dir, "refresh_report.json")
     if _bundle_complete(cache_dir):
-        with open(cached_report) as f:
-            if json.load(f).get("as_of") == remote_as_of:
-                return read_bundle(cache_dir, "cache")
-    os.makedirs(cache_dir, exist_ok=True)
-    for name in ("prices.csv.gz", "universe.json", "factors.csv"):
-        _atomic_write(os.path.join(cache_dir, name), fetch(f"{release_url}/{name}"))
-    # The report goes last: a cache holding the new report always holds the new data.
-    _atomic_write(cached_report, report_bytes)
-    return read_bundle(cache_dir, "release")
+        try:
+            with open(cached_report) as f:
+                cached_as_of = json.load(f).get("as_of")
+            if cached_as_of == remote_as_of:
+                # Try to read the cached bundle; if it fails, fall through to redownload
+                try:
+                    return read_bundle(cache_dir, "cache")
+                except SnapshotUnavailable:
+                    pass  # Cache is corrupt; redownload
+        except (OSError, json.JSONDecodeError, ValueError):
+            pass  # Cache report unreadable; redownload
+
+    # Download all files to a staging directory, validate, then move to cache
+    staging = tempfile.mkdtemp(prefix="marketplug-staging-")
+    try:
+        for name in ("prices.csv.gz", "universe.json", "factors.csv"):
+            _atomic_write(os.path.join(staging, name), fetch(f"{release_url}/{name}"))
+        _atomic_write(os.path.join(staging, "refresh_report.json"), report_bytes)
+
+        # Validate the staging bundle before committing to cache
+        snap = read_bundle(staging, "release")
+
+        # Move staging files to cache
+        os.makedirs(cache_dir, exist_ok=True)
+        for name in BUNDLE_FILES:
+            src = os.path.join(staging, name)
+            dst = os.path.join(cache_dir, name)
+            if os.path.exists(src):
+                os.replace(src, dst)
+
+        return snap
+    finally:
+        # Clean up staging directory
+        import shutil
+        try:
+            shutil.rmtree(staging)
+        except OSError:
+            pass
 
 
-_MEMO = {"snap": None, "at": 0.0}
+_MEMO = {}
 
 
 def load_snapshot(*, data_dir=None, release_url=DATA_RELEASE_URL, cache_dir=None,
-                  fallback_dir=FALLBACK_DIR, fetch=_download, max_age_s=3600, use_memo=True):
+                  fallback_dir=FALLBACK_DIR, fetch=_download, max_age_s=3600, use_memo=True,
+                  clock=time.time):
     """Return the freshest readable bundle. Raises SnapshotUnavailable only when
-    even the bundled fallback can't be read."""
+    even the bundled fallback can't be read.
+
+    Memoizes per (release_url, cache_dir, fallback_dir). Release/cache results
+    memoized for max_age_s; fallback results for FALLBACK_RETRY_S (300s).
+    clock parameter is for testability."""
     pinned = data_dir or os.environ.get("MARKETPLUG_DATA_DIR")
     if pinned:
         return read_bundle(pinned, "pinned")
-    if use_memo and _MEMO["snap"] is not None and time.time() - _MEMO["at"] < max_age_s:
-        return _MEMO["snap"]
-    cache_dir = cache_dir or os.path.join(tempfile.gettempdir(), "marketplug_cache")
+
+    cache_dir = cache_dir or _get_default_cache_dir()
+    memo_key = (release_url, cache_dir, fallback_dir)
+    now = clock()
+
+    # Check memo: different TTL for fallback vs release/cache
+    if use_memo and memo_key in _MEMO:
+        snap, at, is_fallback = _MEMO[memo_key]
+        ttl = FALLBACK_RETRY_S if is_fallback else max_age_s
+        if now - at < ttl:
+            return snap
+
     try:
         snap = _from_release(release_url, cache_dir, fetch)
+        is_fallback = False
     except Exception as e:  # network, HTTP status, bad JSON or a corrupt file: use the fallback
-        snap = dataclasses.replace(
-            read_bundle(fallback_dir, "fallback"),
-            warning=f"Could not download today's data ({type(e).__name__}: {e}); "
-                    f"showing the bundled copy instead.")
+        try:
+            snap = read_bundle(fallback_dir, "fallback")
+            snap = dataclasses.replace(
+                snap,
+                warning=f"Could not download today's data ({type(e).__name__}: {e}); "
+                        f"showing the bundled copy instead.")
+            is_fallback = True
+        except SnapshotUnavailable as fallback_err:
+            # Both release and fallback failed; include both in the message
+            raise SnapshotUnavailable(
+                f"Release failed ({type(e).__name__}: {e}); "
+                f"fallback also failed ({fallback_err})") from e
+
     if use_memo:
-        _MEMO.update(snap=snap, at=time.time())
+        _MEMO[memo_key] = (snap, now, is_fallback)
     return snap
 
 
