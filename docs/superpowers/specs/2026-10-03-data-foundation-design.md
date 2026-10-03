@@ -61,6 +61,17 @@ universe, and make every data failure visible instead of silent.
 - GitHub disables scheduled workflows in a public repo after 60 days with no
   commit, silently. Option B never commits, so a keepalive is required.
 
+## Changes made during planning (2026-10-03)
+
+| Spec said | Plan does | Why |
+|---|---|---|
+| `prices.parquet` | `prices.csv.gz` | Parquet needs pyarrow (~40 MB) in both runtimes; pandas reads gzip CSV with no new dependency. Measured: gzip shrinks the current price CSV to 37.8%, so ~530 tickers ≈ 8 MB. |
+| Separate monthly keepalive workflow | The refresh workflow re-enables itself as its last step | The 60-day rule disables *every* scheduled workflow in the repo, so a separate keepalive would be disabled too. |
+| Sector via Yahoo for every ticker | S&P 500 sectors via a fixed GICS → Yahoo name map; Yahoo lookup only for live tickers | Verified 2026-10-03: the Wikipedia table has 503 rows and exactly the 11 GICS sectors; the map is deterministic and costs 0 requests. |
+| Response adds `data_as_of`, `window_start`, `crisis_coverage` | Grouped under one `data` object: `as_of`, `window_start`, `window_days`, `window_status`, `crisis_coverage` | One place for provenance; keeps the top-level response shape stable. |
+| (silent) | UI live cap 20 / 40 s | Imported portfolios can hold several non-S&P names; results are cached for 6 h per ticker. |
+| Step 0 tests Render | Render is checked in the post-deploy matrix (Task 13) | No zero-cost way to run a probe on Render's free tier; the live path degrades to a clean 422 if blocked. |
+
 ## Data flow
 
 ```

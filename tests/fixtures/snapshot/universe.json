@@ -1,0 +1,202 @@
+{
+ "AAPL": {
+  "asset_class": "Equity",
+  "curated": false,
+  "in_sp500": true,
+  "name": "AAPL",
+  "sector": "Technology",
+  "type": "stock"
+ },
+ "ABBV": {
+  "asset_class": "Equity",
+  "curated": false,
+  "in_sp500": true,
+  "name": "ABBV",
+  "sector": "Healthcare",
+  "type": "stock"
+ },
+ "AGG": {
+  "asset_class": "Bond",
+  "curated": true,
+  "in_sp500": false,
+  "name": "iShares Core U.S. Aggregate Bond ETF",
+  "sector": "Aggregate Bonds",
+  "type": "etf"
+ },
+ "AMZN": {
+  "asset_class": "Equity",
+  "curated": false,
+  "in_sp500": true,
+  "name": "AMZN",
+  "sector": "Consumer Cyclical",
+  "type": "stock"
+ },
+ "BA": {
+  "asset_class": "Equity",
+  "curated": false,
+  "in_sp500": true,
+  "name": "BA",
+  "sector": "Industrials",
+  "type": "stock"
+ },
+ "BAC": {
+  "asset_class": "Equity",
+  "curated": false,
+  "in_sp500": true,
+  "name": "BAC",
+  "sector": "Financial Services",
+  "type": "stock"
+ },
+ "COP": {
+  "asset_class": "Equity",
+  "curated": false,
+  "in_sp500": true,
+  "name": "COP",
+  "sector": "Energy",
+  "type": "stock"
+ },
+ "CVX": {
+  "asset_class": "Equity",
+  "curated": false,
+  "in_sp500": true,
+  "name": "CVX",
+  "sector": "Energy",
+  "type": "stock"
+ },
+ "GOOGL": {
+  "asset_class": "Equity",
+  "curated": false,
+  "in_sp500": true,
+  "name": "GOOGL",
+  "sector": "Communication Services",
+  "type": "stock"
+ },
+ "GS": {
+  "asset_class": "Equity",
+  "curated": false,
+  "in_sp500": true,
+  "name": "GS",
+  "sector": "Financial Services",
+  "type": "stock"
+ },
+ "IEF": {
+  "asset_class": "Bond",
+  "curated": true,
+  "in_sp500": false,
+  "name": "iShares 7-10 Year Treasury Bond ETF",
+  "sector": "Govt Bonds",
+  "type": "etf"
+ },
+ "JNJ": {
+  "asset_class": "Equity",
+  "curated": false,
+  "in_sp500": true,
+  "name": "JNJ",
+  "sector": "Healthcare",
+  "type": "stock"
+ },
+ "JPM": {
+  "asset_class": "Equity",
+  "curated": false,
+  "in_sp500": true,
+  "name": "JPM",
+  "sector": "Financial Services",
+  "type": "stock"
+ },
+ "LQD": {
+  "asset_class": "Bond",
+  "curated": true,
+  "in_sp500": false,
+  "name": "iShares iBoxx $ Investment Grade Corporate Bond ETF",
+  "sector": "Corp Bonds",
+  "type": "etf"
+ },
+ "META": {
+  "asset_class": "Equity",
+  "curated": false,
+  "in_sp500": true,
+  "name": "META",
+  "sector": "Communication Services",
+  "type": "stock"
+ },
+ "MS": {
+  "asset_class": "Equity",
+  "curated": false,
+  "in_sp500": true,
+  "name": "MS",
+  "sector": "Financial Services",
+  "type": "stock"
+ },
+ "MSFT": {
+  "asset_class": "Equity",
+  "curated": false,
+  "in_sp500": true,
+  "name": "MSFT",
+  "sector": "Technology",
+  "type": "stock"
+ },
+ "NVDA": {
+  "asset_class": "Equity",
+  "curated": false,
+  "in_sp500": true,
+  "name": "NVDA",
+  "sector": "Technology",
+  "type": "stock"
+ },
+ "PFE": {
+  "asset_class": "Equity",
+  "curated": false,
+  "in_sp500": true,
+  "name": "PFE",
+  "sector": "Healthcare",
+  "type": "stock"
+ },
+ "SPY": {
+  "asset_class": "Equity",
+  "curated": true,
+  "in_sp500": false,
+  "name": "SPDR S&P 500 ETF Trust",
+  "sector": "Broad Market",
+  "type": "etf"
+ },
+ "TLT": {
+  "asset_class": "Bond",
+  "curated": true,
+  "in_sp500": false,
+  "name": "iShares 20+ Year Treasury Bond ETF",
+  "sector": "Govt Bonds",
+  "type": "etf"
+ },
+ "TSLA": {
+  "asset_class": "Equity",
+  "curated": false,
+  "in_sp500": true,
+  "name": "TSLA",
+  "sector": "Consumer Cyclical",
+  "type": "stock"
+ },
+ "UNH": {
+  "asset_class": "Equity",
+  "curated": false,
+  "in_sp500": true,
+  "name": "UNH",
+  "sector": "Healthcare",
+  "type": "stock"
+ },
+ "WMT": {
+  "asset_class": "Equity",
+  "curated": false,
+  "in_sp500": true,
+  "name": "WMT",
+  "sector": "Consumer Defensive",
+  "type": "stock"
+ },
+ "XOM": {
+  "asset_class": "Equity",
+  "curated": false,
+  "in_sp500": true,
+  "name": "XOM",
+  "sector": "Energy",
+  "type": "stock"
+ }
+}

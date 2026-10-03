@@ -1,0 +1,11 @@
+{
+ "as_of": "2026-06-18",
+ "built_at": "2026-06-20T00:00:00Z",
+ "mode": "full",
+ "n_tickers": 25,
+ "failed": {},
+ "quarantined": {},
+ "repulled": [],
+ "universe_fallback": false,
+ "factors_through": "2026-06-30"
+}
