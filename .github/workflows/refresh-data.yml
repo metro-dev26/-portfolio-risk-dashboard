@@ -46,6 +46,7 @@ jobs:
       - name: Download previous bundle
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: gh release download data-latest -D prev || echo "::warning::no previous bundle downloaded; building in full"
       - name: Build
         run: python tools/build_snapshot.py --mode "${{ steps.mode.outputs.mode }}" --prev-dir prev --out-dir out
@@ -60,6 +61,7 @@ jobs:
       - name: Publish dated release and update data-latest
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           retry() {
             for attempt in 1 2 3; do
@@ -83,9 +85,11 @@ jobs:
       - name: Prune releases older than 14 days
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: python tools/prune_releases.py --keep-days 14
       - name: Keep the schedule alive
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/refresh-data.yml/enable"
