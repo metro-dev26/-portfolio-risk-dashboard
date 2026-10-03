@@ -1,8 +1,13 @@
 import json
+import os
 import numpy as np
 import pandas as pd
 import pytest
-from risk_engine.data import load_prices
+
+# Every test reads the frozen June 2026 bundle and never touches the network.
+os.environ.setdefault("MARKETPLUG_DATA_DIR",
+                      os.path.join(os.path.dirname(__file__), "fixtures", "snapshot"))
+os.environ.setdefault("MARKETPLUG_NO_LIVE", "1")
 
 HOLDINGS = ["AAPL", "MSFT", "JPM", "XOM", "TLT"]
 CONF = 0.95
@@ -10,7 +15,9 @@ CONF = 0.95
 
 @pytest.fixture(scope="session")
 def market():
-    prices, lr, _ = load_prices(prefer_live=False)
+    from risk_engine.data import load_snapshot
+    prices = load_snapshot().prices.ffill().dropna()
+    lr = np.log(prices / prices.shift(1)).dropna()
     return prices, lr
 
 

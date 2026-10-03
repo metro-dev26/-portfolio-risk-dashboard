@@ -1,18 +1,17 @@
 """Fama-French 3-factor loading and analysis. Pure — no UI.
 Factors are stored as decimals (Mkt-RF, SMB, HML, RF are simple daily returns)."""
-import os
 import numpy as np
 import pandas as pd
 
 from risk_engine.config import TRADING_DAYS
 
-_FACTORS = os.path.join(os.path.dirname(os.path.dirname(__file__)), "factors.csv")
 FACTOR_NAMES = ["Mkt-RF", "SMB", "HML"]
 
 
 def load_factors():
     """Return the factor DataFrame (DatetimeIndex; columns Mkt-RF, SMB, HML, RF; decimals)."""
-    return pd.read_csv(_FACTORS, index_col=0, parse_dates=True)
+    from risk_engine.data import load_snapshot
+    return load_snapshot().factors
 
 
 def factor_regression(port_returns, factors):
