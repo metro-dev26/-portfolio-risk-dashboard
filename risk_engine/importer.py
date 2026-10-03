@@ -13,7 +13,15 @@ TICKER_HEADERS = ("symbol", "ticker")
 VALUE_HEADERS = ("market value", "current value", "value", "amount")
 QTY_HEADERS = ("quantity", "shares", "qty")
 
-_AMOUNT = re.compile(r"^\(?-?\$?-?[\d,]*\.?\d+\)?$")
+_AMOUNT = re.compile(
+    r"^\(?-?\$?\s*(\d+|\d{1,3}(,\d{3})+)(\.\d+)?\)?$"
+)
+
+
+def _truncate(text, max_len=40):
+    """Truncate text to max_len, appending … if cut."""
+    text = str(text)
+    return text if len(text) <= max_len else text[:max_len] + "…"
 
 
 @dataclass
@@ -23,24 +31,42 @@ class ParseResult:
 
 
 def parse_amount(text):
-    """'$25,000.50' -> 25000.5; '(1,234)' and '-5' -> negative; anything else -> None."""
-    t = str(text).strip().replace(" ", "")
+    """'$25,000.50' -> 25000.5; '(1,234)' and '-5' -> negative; anything else -> None.
+    Grammar: optional '(' ... ')' (both or neither), optional '-', optional '$' optionally
+    followed by ONE space, then digits as plain or comma-grouped, optional decimal. No other spaces."""
+    t = str(text).strip()
     if not t or not _AMOUNT.match(t):
         return None
-    value = float(re.sub(r"[^\d.]", "", t))
-    return -value if (t.startswith("(") or "-" in t) else value
+
+    # Check for balanced parentheses (both or neither)
+    open_count = t.count("(")
+    close_count = t.count(")")
+    if open_count != close_count or (open_count > 0 and not (t.startswith("(") and t.endswith(")"))):
+        return None
+
+    # Extract sign, handle parentheses
+    is_negative = t.startswith("(") or (t.startswith("-") and not t.startswith("(-"))
+    # Remove all non-digit and non-decimal characters except what we're keeping
+    value_str = re.sub(r"[^\d.]", "", t)
+    try:
+        value = float(value_str)
+    except ValueError:
+        return None
+    return -value if is_negative else value
 
 
 class _Collector:
     def __init__(self):
         self.holdings, self.notes, self.counts = {}, [], {}
 
-    def add(self, raw_ticker, amount, where):
+    def add(self, raw_ticker, amount, where, raw_amount_text=""):
         t = normalize_ticker(raw_ticker)
         if not TICKER_RE.fullmatch(t):
-            self.notes.append(f"{where}: '{raw_ticker}' is not a valid ticker — skipped")
+            self.notes.append(f"{where}: '{_truncate(raw_ticker)}' is not a valid ticker — skipped")
         elif amount is None:
-            self.notes.append(f"{where}: no dollar amount for {t} — skipped")
+            self.notes.append(f"{where}: no dollar amount for {t} ('{_truncate(raw_amount_text)}') — skipped")
+        elif not math.isfinite(amount) or amount > 1e12:
+            self.notes.append(f"{where}: {t} is over the $1,000,000,000,000 limit — skipped")
         elif amount < 0:
             self.notes.append(f"{where}: {t} has a negative amount "
                               f"(short positions are not supported) — skipped")
@@ -64,9 +90,9 @@ def parse_paste(text):
             continue
         parts = [p for p in re.split(r"[\s,;]+", line, maxsplit=1) if p]
         if len(parts) != 2:
-            c.notes.append(f"line {i}: expected 'TICKER AMOUNT', got '{line}' — skipped")
+            c.notes.append(f"line {i}: expected 'TICKER AMOUNT', got '{_truncate(line)}' — skipped")
             continue
-        c.add(parts[0], parse_amount(parts[1]), f"line {i}")
+        c.add(parts[0], parse_amount(parts[1]), f"line {i}", parts[1])
     return c.result()
 
 
@@ -79,7 +105,11 @@ def parse_csv(text, *, last_price=None):
     """Broker exports often put account details above the header row, so the
     header is the first row that names a ticker column. `last_price(ticker)` values
     quantity-only files; it may return None when no price is known."""
-    rows = list(csv.reader(io.StringIO(text.lstrip("﻿"))))
+    try:
+        rows = list(csv.reader(io.StringIO(text.lstrip("﻿"))))
+    except csv.Error as e:
+        return ParseResult({}, [f"could not read this CSV ({e})"])
+
     hdr_i = next((i for i, r in enumerate(rows) if _find(r, TICKER_HEADERS)), None)
     if hdr_i is None:
         return ParseResult({}, ["no ticker column found — expected a header named Symbol or Ticker"])
@@ -101,12 +131,21 @@ def parse_csv(text, *, last_price=None):
             continue
         sym, number = r[t_col].strip(), parse_amount(r[col])
         if v_name is None and number is not None and number > 0:
-            price = last_price(normalize_ticker(sym))
-            if price is None:
-                c.notes.append(f"row {i}: no price for {normalize_ticker(sym)} to value its shares — skipped")
+            # Validate ticker before calling last_price
+            t_norm = normalize_ticker(sym)
+            if not TICKER_RE.fullmatch(t_norm):
+                c.notes.append(f"row {i}: '{_truncate(sym)}' is not a valid ticker — skipped")
+                continue
+            try:
+                price = last_price(t_norm)
+            except Exception as e:
+                c.notes.append(f"row {i}: no price for {t_norm} to value its shares — skipped")
+                continue
+            if price is None or not math.isfinite(price) or price <= 0:
+                c.notes.append(f"row {i}: no price for {t_norm} to value its shares — skipped")
                 continue
             number *= price
-        c.add(sym, number, f"row {i}")
+        c.add(sym, number, f"row {i}", r[col] if col < len(r) else "")
     return c.result()
 
 
@@ -116,11 +155,44 @@ def from_rows(rows):
     c = _Collector()
     for i, (ticker, amount) in enumerate(rows, 1):
         blank_ticker = ticker is None or str(ticker).strip() == ""
-        blank_amount = amount is None or (isinstance(amount, float) and math.isnan(amount))
+
+        # Handle amount: try to convert to float, or parse as string
+        amount_value = None
+        amount_text = ""
+        if amount is not None:
+            if isinstance(amount, str):
+                amount_value = parse_amount(amount)
+                amount_text = amount
+            elif isinstance(amount, float):
+                if math.isnan(amount):
+                    amount_value = None
+                else:
+                    amount_value = amount
+            elif hasattr(amount, "item"):  # numpy/pandas scalars
+                try:
+                    val = float(amount.item()) if hasattr(amount, "item") else float(amount)
+                    if math.isnan(val):
+                        amount_value = None
+                    else:
+                        amount_value = val
+                except (TypeError, ValueError):
+                    amount_value = None
+            else:
+                try:
+                    amount_value = float(amount)
+                except (TypeError, ValueError):
+                    amount_value = None
+
+        blank_amount = amount_value is None
+
         if blank_ticker and blank_amount:
             continue
-        c.add("" if blank_ticker else ticker, None if blank_amount else float(amount),
-              f"table row {i}")
+
+        if blank_ticker and not blank_amount:
+            c.notes.append(f"table row {i}: ticker missing — skipped")
+            continue
+
+        c.add("" if blank_ticker else ticker, amount_value, f"table row {i}", amount_text)
     return c.result()
 
 
@@ -129,6 +201,7 @@ def encode_share(holdings):
 
 
 def decode_share(param):
+    """Decode a share link, returning ParseResult with holdings and notes about invalid entries."""
     if not param:
-        return {}
-    return parse_paste("\n".join(p.replace(":", " ", 1) for p in param.split(","))).holdings
+        return ParseResult({}, [])
+    return parse_paste("\n".join(p.replace(":", " ", 1) for p in param.split(",")))

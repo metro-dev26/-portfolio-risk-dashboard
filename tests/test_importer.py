@@ -1,13 +1,16 @@
 import math
 
+import pandas as pd
 import pytest
 
 from risk_engine import importer
 
 
 @pytest.mark.parametrize("text,value", [
-    ("10000", 10000.0), ("$25,000", 25000.0), ("8,500.50", 8500.5), ("$ 1 000", 1000.0),
-    ("(1,234.00)", -1234.0), ("-5", -5.0), ("abc", None), ("", None), ("1.2.3", None),
+    ("10000", 10000.0), ("$25,000", 25000.0), ("8,500.50", 8500.5), ("$ 1 000", None),
+    ("$ 1000", 1000.0), ("(1,234.00)", -1234.0), ("-5", -5.0), ("abc", None), ("", None),
+    ("1.2.3", None), ("1000,50", None), ("250,5", None), ("1,2", None), ("50 230.00", None),
+    ("10 20", None), ("500)", None), ("(500", None), ("1,234,567.89", 1234567.89),
 ])
 def test_parse_amount(text, value):
     assert importer.parse_amount(text) == value
@@ -61,7 +64,7 @@ def test_csv_finds_header_below_account_info_and_skips_junk_rows():
 
 
 def test_csv_handles_byte_order_mark_and_lowercase_headers():
-    r = importer.parse_csv("﻿ticker,amount\nmsft,9000\n".lstrip("﻿"))
+    r = importer.parse_csv("﻿ticker,amount\nmsft,9000\n")
     assert r.holdings == {"MSFT": 9000.0}
 
 
@@ -88,9 +91,91 @@ def test_from_rows_ignores_blank_editor_rows():
     assert r.holdings == {"AAPL": 1000.0, "MSFT": 500.0} and r.notes == []
 
 
+def test_parse_amount_rejects_non_finite():
+    r = importer.parse_paste("AAPL " + "9" * 400)
+    assert r.holdings == {} and any("limit" in n for n in r.notes)
+
+
+def test_parse_paste_rejects_huge_amounts():
+    r = importer.parse_paste("AAPL 2000000000000")
+    assert r.holdings == {} and any("limit" in n for n in r.notes)
+
+
+def test_from_rows_rejects_nan():
+    r = importer.from_rows([("AAPL", float("nan"))])
+    assert r.holdings == {} and any("dollar amount" in n for n in r.notes)
+
+
+def test_from_rows_rejects_float32_nan():
+    import numpy as np
+    r = importer.from_rows([("AAPL", np.float32("nan"))])
+    assert r.holdings == {} and len(r.notes) == 1
+
+
+def test_from_rows_handles_string_amounts():
+    r = importer.from_rows([("AAPL", "1,000")])
+    assert r.holdings == {"AAPL": 1000.0}
+
+
+def test_from_rows_rejects_invalid_string_amounts():
+    r = importer.from_rows([("AAPL", "abc")])
+    assert r.holdings == {} and any("dollar amount" in n for n in r.notes)
+
+
+def test_from_rows_rejects_missing_ticker():
+    r = importer.from_rows([("", 500.0)])
+    assert r.holdings == {} and any("ticker missing" in n for n in r.notes)
+
+
+def test_from_rows_rejects_pd_na():
+    r = importer.from_rows([("AAPL", pd.NA)])
+    assert r.holdings == {} and any("dollar amount" in n for n in r.notes)
+
+
+def test_csv_quantity_validates_ticker_before_price_lookup():
+    calls = []
+    def tracker(t):
+        calls.append(t)
+        return None
+    r = importer.parse_csv("Symbol,Quantity\nTotal Cash,100\nAAPL,10\n", last_price=tracker)
+    assert "Total Cash" not in calls
+    assert "AAPL" in calls or r.holdings == {}
+
+
+def test_csv_quantity_handles_zero_price():
+    r = importer.parse_csv("Symbol,Quantity\nAAPL,10\n", last_price=lambda t: 0)
+    assert r.holdings == {} and any("no price" in n for n in r.notes)
+
+
+def test_csv_quantity_handles_negative_price():
+    r = importer.parse_csv("Symbol,Quantity\nAAPL,10\n", last_price=lambda t: -100)
+    assert r.holdings == {} and any("no price" in n for n in r.notes)
+
+
+def test_csv_quantity_handles_exception_in_last_price():
+    def broken(t):
+        raise ValueError("API error")
+    r = importer.parse_csv("Symbol,Quantity\nAAPL,10\n", last_price=broken)
+    assert r.holdings == {} and any("no price" in n for n in r.notes)
+
+
+def test_csv_handles_malformed_csv():
+    huge = "x" * 200_000
+    r = importer.parse_csv(f"Symbol,Amount\nAAPL,{huge}\n")
+    assert r.holdings == {} and any("could not read" in n for n in r.notes)
+
+
 def test_share_link_round_trip():
     h = {"AAPL": 10000.4, "BRK-B": 5000.0}
     assert importer.encode_share(h) == "AAPL:10000,BRK-B:5000"
-    assert importer.decode_share("AAPL:10000,BRK-B:5000") == {"AAPL": 10000.0, "BRK-B": 5000.0}
-    assert importer.decode_share("") == {}
-    assert importer.decode_share("garbage") == {}
+    r = importer.decode_share("AAPL:10000,BRK-B:5000")
+    assert r.holdings == {"AAPL": 10000.0, "BRK-B": 5000.0}
+    assert importer.decode_share("").holdings == {}
+    assert importer.decode_share("garbage").holdings == {}
+
+
+def test_decode_share_reports_invalid_entries():
+    r = importer.decode_share("AAPL:1000,MSFT:oops,TSLA:-5")
+    assert r.holdings == {"AAPL": 1000.0}
+    assert any("MSFT" in n for n in r.notes)
+    assert any("TSLA" in n for n in r.notes)
