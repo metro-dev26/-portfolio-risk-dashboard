@@ -25,9 +25,10 @@ def validate_holdings(v):
             raise ValueError(f"amount for {t} must be a finite number")
         if amount <= 0:
             raise ValueError(f"amount for {t} must be > 0")
-        if amount > _MAX_AMOUNT:
-            raise ValueError(f"amount for {t} exceeds the maximum of {_MAX_AMOUNT:.0f}")
         out[t] = out.get(t, 0.0) + amount
+        # Held to the cap after merging: spellings of one ticker add up.
+        if out[t] > _MAX_AMOUNT:
+            raise ValueError(f"amount for {t} exceeds the maximum of {_MAX_AMOUNT:.0f}")
     # Counted after merging: "aapl" and "AAPL" are one holding, not two.
     if not (MIN_HOLDINGS <= len(out) <= MAX_HOLDINGS):
         raise ValueError(f"holdings must contain between {MIN_HOLDINGS} and {MAX_HOLDINGS} "
@@ -61,6 +62,7 @@ class Factors(BaseModel):
     alpha_annual: float
     r2: float
     variance_split: dict[str, float]
+    observations: int
 
 
 class Optimizer(BaseModel):
@@ -73,11 +75,12 @@ class Optimizer(BaseModel):
 
 
 class BacktestRow(BaseModel):
+    observations: int
     breaches: int
     expected: float
     kupiec_p: float
     christoffersen_p: float
-    passed: bool
+    passed: Optional[bool]    # null when there are too few observations to grade
 
 
 class Backtest(BaseModel):
@@ -90,6 +93,7 @@ class DataInfo(BaseModel):
     window_start: str
     window_days: int
     window_status: str
+    window_message: str       # why the window is short; empty when it is not
     crisis_coverage: dict[str, list[str]]
 
 
@@ -99,6 +103,31 @@ class AnalyzeResponse(BaseModel):
     optimizer: Optimizer
     data: DataInfo
     backtest: Optional[Backtest] = None
+
+
+class Problem(BaseModel):
+    ticker: str
+    reason: str
+
+
+class ProblemDetail(BaseModel):
+    problems: list[Problem]
+
+
+class ProblemResponse(BaseModel):
+    """422 body when the engine can't use the holdings."""
+    detail: ProblemDetail
+
+
+class UnavailableResponse(BaseModel):
+    """503 body from /analyze when no market-data snapshot can be read."""
+    detail: str
+
+
+class DegradedResponse(BaseModel):
+    """503 body from /health."""
+    status: str
+    detail: str
 
 
 class PortfolioIn(BaseModel):

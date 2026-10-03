@@ -118,8 +118,11 @@ Run locally:
     uvicorn api.main:app --reload
     # open http://localhost:8000/docs
 
-**Notes.** Analysis uses the committed price snapshot (deterministic, no live
-fetch in the request path). On the free-tier host the service sleeps when idle,
+**Notes.** Analysis reads a daily-refreshed data bundle (prices, universe, factors),
+with a dated copy in the repository as the fallback when the download fails.
+Tickers outside the bundle are looked up live on Yahoo Finance, at most 5 per
+request within a 10 s budget; a ticker that cannot be used is reported with a
+reason in a 422. On the free-tier host the service sleeps when idle,
 so the first request after a pause takes ~30–50s to wake. Saved portfolios use
 SQLite on the host's ephemeral filesystem and do not persist across redeploys —
 the persistence layer demonstrates the capability; a production deployment would

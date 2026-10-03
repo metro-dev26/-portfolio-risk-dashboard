@@ -1,7 +1,9 @@
+import dataclasses
 import json
 
 import pytest
 
+from risk_engine import data
 from risk_engine.analyze import PortfolioError, analyze_portfolio
 
 HOLDINGS = {"AAPL": 20000, "MSFT": 20000, "JPM": 20000, "XOM": 20000, "TLT": 20000}
@@ -11,10 +13,13 @@ def test_analyze_returns_expected_structure():
     r = analyze_portfolio(HOLDINGS)
     assert set(r) == {"metrics", "factors", "optimizer", "backtest", "data"}
     assert {"hist_var", "gaussian_var", "sharpe", "annual_vol", "max_drawdown"} <= set(r["metrics"])
-    assert set(r["factors"]) == {"betas", "alpha_annual", "r2", "variance_split"}
+    assert set(r["factors"]) == {"betas", "alpha_annual", "r2", "variance_split", "observations"}
     assert {"current_sharpe", "max_sharpe_weights", "min_variance_weights", "top_sector"} <= set(r["optimizer"])
     assert set(r["backtest"]) == {"historical", "gaussian"}
     assert r["data"]["as_of"] == "2026-06-18" and r["data"]["window_status"] == "ok"
+    assert r["data"]["window_message"] == ""
+    assert all(row["observations"] >= 100 and isinstance(row["passed"], bool)
+               for row in r["backtest"].values())
     assert r["data"]["crisis_coverage"]["COVID-19 Crash"] == []
 
 
@@ -23,6 +28,15 @@ def test_unresolvable_ticker_raises_with_reason_per_ticker():
         analyze_portfolio({"AAPL": 1000, "XYZQQ": 500})
     assert e.value.problems[0]["ticker"] == "XYZQQ"
     assert "disabled" in e.value.problems[0]["reason"]     # tests run with live lookups off
+
+
+def test_empty_factor_data_is_refused_with_a_reason():
+    snap = data.load_snapshot(use_memo=False)
+    bare = dataclasses.replace(snap, factors=snap.factors.iloc[0:0])
+    with pytest.raises(PortfolioError) as e:
+        analyze_portfolio(HOLDINGS, snapshot=bare)
+    assert e.value.problems[0]["ticker"] == "(factors)"
+    assert "is empty" in e.value.problems[0]["reason"]
 
 
 def test_analyze_values_are_finite_and_sane():

@@ -79,3 +79,9 @@ def test_rolling_var_breaches_invalid_method_raises():
     r = pd.Series(np.random.randn(300))
     with pytest.raises(ValueError, match="unknown method"):
         backtest.rolling_var_breaches(r, conf=0.95, window=250, method="bogus")
+
+
+def test_backtest_var_rows_count_their_out_of_sample_days():
+    r = _normal_series(n=700)
+    for row in backtest.backtest_var(r, conf=0.95, window=250):
+        assert row["observations"] == 450

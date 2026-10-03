@@ -77,7 +77,8 @@ def backtest_var(port_returns, conf, window=250, methods=("historical", "gaussia
         _, kp = kupiec_pof(n, x, conf)
         _, cp = christoffersen_cc(res["breach"], conf)
         rows.append({
-            "method": method, "breaches": x, "expected": round(n * (1 - conf), 1),
+            "method": method, "observations": n, "breaches": x,
+            "expected": round(n * (1 - conf), 1),
             "kupiec_p": kp, "christoffersen_p": cp,
             "passed": bool(kp > 0.05 and cp > 0.05),
         })

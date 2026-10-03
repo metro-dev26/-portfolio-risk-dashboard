@@ -1,6 +1,7 @@
 """FastAPI transport over the pure risk engine. Handlers are thin: validate
 (via pydantic) -> call the engine/store -> return a typed model. The auto-generated
 Swagger UI at /docs is the point. Educational tool, not financial advice."""
+import logging
 import math
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -9,9 +10,12 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from api import store
-from api.schemas import AnalyzeRequest, AnalyzeResponse, PortfolioIn, PortfolioOut
+from api.schemas import (AnalyzeRequest, AnalyzeResponse, DegradedResponse, PortfolioIn,
+                         PortfolioOut, ProblemResponse, UnavailableResponse)
 from risk_engine import data
 from risk_engine.analyze import PortfolioError, analyze_portfolio
+
+log = logging.getLogger(__name__)
 
 app = FastAPI(
     title="MarketPlug Risk API",
@@ -41,17 +45,20 @@ async def _on_validation_error(request: Request, exc: RequestValidationError):
                         content={"detail": _json_safe(jsonable_encoder(exc.errors()))})
 
 
-@app.get("/health")
+@app.get("/health", responses={
+    503: {"model": DegradedResponse,
+          "description": "No market-data snapshot could be read; the service cannot analyse anything."}})
 def health():
     try:
         snap = data.load_snapshot()
     except data.SnapshotUnavailable as e:
+        log.exception("health check: no market-data snapshot is readable")
         return JSONResponse(status_code=503, content={"status": "degraded", "detail": str(e)})
     return {"status": "ok", "data_as_of": snap.as_of, "stale": data.is_stale(snap),
             "data_source": snap.source}
 
 
-def _analyze_or_422(holdings, **kwargs):
+def _analyze_or_http_error(holdings, **kwargs):
     try:
         return analyze_portfolio(holdings, **kwargs)
     except PortfolioError as e:
@@ -60,10 +67,17 @@ def _analyze_or_422(holdings, **kwargs):
         raise HTTPException(status_code=503, detail=f"market data is unavailable: {e}")
 
 
-@app.post("/analyze", response_model=AnalyzeResponse)
+@app.post("/analyze", response_model=AnalyzeResponse, responses={
+    422: {"model": ProblemResponse,
+          "description": "The holdings were refused. Request-schema failures return `detail` "
+                         "as a list of validation errors; holdings the engine can't use return "
+                         "`detail.problems`, one `{ticker, reason}` per ticker (a data-wide "
+                         "problem is reported under the ticker `(factors)`)."},
+    503: {"model": UnavailableResponse,
+          "description": "No market-data snapshot could be read."}})
 def analyze(req: AnalyzeRequest):
-    return _analyze_or_422(req.holdings, confidence=req.confidence,
-                           include_backtest=req.include_backtest)
+    return _analyze_or_http_error(req.holdings, confidence=req.confidence,
+                                  include_backtest=req.include_backtest)
 
 
 @app.post("/portfolios", response_model=PortfolioOut)
@@ -83,5 +97,5 @@ def get_portfolio(pid: int, analyze: bool = Query(False)):
     if row is None:
         raise HTTPException(status_code=404, detail="portfolio not found")
     if analyze:
-        row["analysis"] = _analyze_or_422(row["holdings"])
+        row["analysis"] = _analyze_or_http_error(row["holdings"])
     return row

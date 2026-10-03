@@ -30,6 +30,12 @@ def test_tickers_are_normalized_and_merged():
     assert req.holdings == {"BRK-B": 1500.0, "AAPL": 10.0}
 
 
+def test_merged_amount_is_held_to_the_maximum():
+    """Each spelling is under the cap; together they are not."""
+    with pytest.raises(ValidationError, match="exceeds the maximum"):
+        AnalyzeRequest(holdings={"brk.b": 4e11, "BRK-B": 4e11, "Brk-B": 4e11, "AAPL": 1})
+
+
 def test_fifty_holdings_are_accepted():
     assert len(AnalyzeRequest(holdings={f"T{i}": 1 for i in range(50)}).holdings) == 50
 

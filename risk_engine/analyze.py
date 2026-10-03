@@ -6,7 +6,8 @@ import numpy as np
 
 from risk_engine import backtest, data, metrics, optimize, portfolio
 from risk_engine import factors as fac
-from risk_engine.config import BENCHMARK, LIVE_BUDGET_API_S, LIVE_MAX_API
+from risk_engine.config import (BACKTEST_MIN_OBS, BENCHMARK, FACTOR_MIN_OBS,
+                                LIVE_BUDGET_API_S, LIVE_MAX_API)
 
 
 class PortfolioError(ValueError):
@@ -15,6 +16,16 @@ class PortfolioError(ValueError):
     def __init__(self, problems):
         super().__init__("; ".join(f"{p['ticker']}: {p['reason']}" for p in problems))
         self.problems = problems
+
+
+FACTORS_PROBLEM = "(factors)"
+
+
+def _factor_gap_reason(factors, shared, window_days):
+    ends = f"ends {factors.index.max().date()}" if len(factors) else "is empty"
+    return (f"The Fama-French factor data {ends}, so only {shared} of this portfolio's "
+            f"{window_days} trading days have factors; at least {FACTOR_MIN_OBS} are needed "
+            f"to estimate factor exposure.")
 
 
 def analyze_portfolio(holdings, *, confidence=0.95, include_backtest=True,
@@ -30,6 +41,10 @@ def analyze_portfolio(holdings, *, confidence=0.95, include_backtest=True,
         raise PortfolioError([{"ticker": win.limiting, "reason": win.message}])
 
     lr = win.returns
+    shared = len(lr.index.intersection(snap.factors.index))
+    if shared < FACTOR_MIN_OBS:
+        raise PortfolioError([{"ticker": FACTORS_PROBLEM,
+                               "reason": _factor_gap_reason(snap.factors, shared, win.n_days)}])
     amounts = np.array([res.holdings[t] for t in tickers], dtype=float)
     weights = amounts / amounts.sum()
     pr = metrics.portfolio_returns(lr, tickers, weights)
@@ -54,6 +69,7 @@ def analyze_portfolio(holdings, *, confidence=0.95, include_backtest=True,
         "alpha_annual": reg["alpha_annual"],
         "r2": reg["r2"],
         "variance_split": fac.variance_attribution(reg),
+        "observations": reg["n_obs"],
     }
 
     mu = optimize.annualized_mean(lr, tickers)
@@ -81,6 +97,7 @@ def analyze_portfolio(holdings, *, confidence=0.95, include_backtest=True,
         "window_start": str(win.start.date()),
         "window_days": int(win.n_days),
         "window_status": win.status,
+        "window_message": win.message,
         "crisis_coverage": {c["label"]: c["missing"]
                             for c in portfolio.crisis_coverage(res.prices, tickers)},
     }
@@ -89,11 +106,13 @@ def analyze_portfolio(holdings, *, confidence=0.95, include_backtest=True,
         rows = backtest.backtest_var(pr, confidence)
         result["backtest"] = {
             r["method"]: {
+                "observations": int(r["observations"]),
                 "breaches": int(r["breaches"]),
                 "expected": float(r["expected"]),
                 "kupiec_p": float(r["kupiec_p"]),
                 "christoffersen_p": float(r["christoffersen_p"]),
-                "passed": bool(r["passed"]),
+                # Too few out-of-sample days to grade: report the numbers, not a verdict.
+                "passed": bool(r["passed"]) if r["observations"] >= BACKTEST_MIN_OBS else None,
             }
             for r in rows
         }

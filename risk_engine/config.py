@@ -68,6 +68,8 @@ CRISES = [
 MIN_HOLDINGS, MAX_HOLDINGS = 2, 50
 WINDOW_OK_DAYS = 504      # two years of shared history: results run normally
 WINDOW_MIN_DAYS = 252     # under one year, VaR is too noisy to show
+BACKTEST_MIN_OBS = 100    # fewer out-of-sample days than this and a pass/fail verdict means nothing
+FACTOR_MIN_OBS = 60       # fewer days shared with the factor data and the loadings are noise
 STALE_BUSINESS_DAYS = 3
 
 LIVE_MAX_API, LIVE_BUDGET_API_S = 5, 10.0
