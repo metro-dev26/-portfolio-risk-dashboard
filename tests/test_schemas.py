@@ -13,14 +13,25 @@ def test_good_request_defaults():
 
 
 @pytest.mark.parametrize("holdings", [
-    {"AAPL": 20000},                       # fewer than 2
-    {"AAPL": 20000, "MSFT": -5},           # non-positive amount
-    {"AAPL": 20000, "NOTREAL": 20000},     # unknown ticker
-    {f"AAPL{i}": 1 for i in range(13)},    # more than 12 (and unknown)
+    {"AAPL": 20000},                          # fewer than 2
+    {"AAPL": 20000, "aapl": 5},               # two keys, one holding once merged
+    {"AAPL": 20000, "MSFT": -5},              # non-positive amount
+    {"AAPL": 20000, "AAPL/../X": 1},          # not a ticker format
+    {"AAPL": 20000, "<script>": 1},           # not a ticker format
+    {f"T{i}": 1 for i in range(51)},          # more than 50
 ])
 def test_bad_holdings_rejected(holdings):
     with pytest.raises(ValidationError):
         AnalyzeRequest(holdings=holdings)
+
+
+def test_tickers_are_normalized_and_merged():
+    req = AnalyzeRequest(holdings={"brk.b": 1000, "BRK-B": 500, "aapl": 10})
+    assert req.holdings == {"BRK-B": 1500.0, "AAPL": 10.0}
+
+
+def test_fifty_holdings_are_accepted():
+    assert len(AnalyzeRequest(holdings={f"T{i}": 1 for i in range(50)}).holdings) == 50
 
 
 @pytest.mark.parametrize("holdings", [

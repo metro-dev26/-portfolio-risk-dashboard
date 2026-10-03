@@ -10,7 +10,8 @@ from fastapi.responses import JSONResponse
 
 from api import store
 from api.schemas import AnalyzeRequest, AnalyzeResponse, PortfolioIn, PortfolioOut
-from risk_engine.analyze import analyze_portfolio
+from risk_engine import data
+from risk_engine.analyze import PortfolioError, analyze_portfolio
 
 app = FastAPI(
     title="MarketPlug Risk API",
@@ -42,14 +43,27 @@ async def _on_validation_error(request: Request, exc: RequestValidationError):
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    try:
+        snap = data.load_snapshot()
+    except data.SnapshotUnavailable as e:
+        return JSONResponse(status_code=503, content={"status": "degraded", "detail": str(e)})
+    return {"status": "ok", "data_as_of": snap.as_of, "stale": data.is_stale(snap),
+            "data_source": snap.source}
+
+
+def _analyze_or_422(holdings, **kwargs):
+    try:
+        return analyze_portfolio(holdings, **kwargs)
+    except PortfolioError as e:
+        raise HTTPException(status_code=422, detail={"problems": e.problems})
+    except data.SnapshotUnavailable as e:
+        raise HTTPException(status_code=503, detail=f"market data is unavailable: {e}")
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)
 def analyze(req: AnalyzeRequest):
-    return analyze_portfolio(
-        req.holdings, confidence=req.confidence, include_backtest=req.include_backtest
-    )
+    return _analyze_or_422(req.holdings, confidence=req.confidence,
+                           include_backtest=req.include_backtest)
 
 
 @app.post("/portfolios", response_model=PortfolioOut)
@@ -69,5 +83,5 @@ def get_portfolio(pid: int, analyze: bool = Query(False)):
     if row is None:
         raise HTTPException(status_code=404, detail="portfolio not found")
     if analyze:
-        row["analysis"] = analyze_portfolio(row["holdings"])
+        row["analysis"] = _analyze_or_422(row["holdings"])
     return row

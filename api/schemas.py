@@ -5,9 +5,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
 
-from risk_engine.config import TICKERS
-
-_UNIVERSE = set(TICKERS)
+from risk_engine.config import MAX_HOLDINGS, MIN_HOLDINGS
+from risk_engine.data import TICKER_RE, normalize_ticker
 
 # A holding above this is nonsensical for a portfolio and only serves to probe
 # for overflow; reject it rather than let a degenerate weight poison the math.
@@ -15,20 +14,25 @@ _MAX_AMOUNT = 1e12
 
 
 def validate_holdings(v):
-    if not (2 <= len(v) <= 12):
-        raise ValueError("holdings must contain between 2 and 12 tickers")
+    out = {}
     for ticker, amount in v.items():
-        if ticker not in _UNIVERSE:
-            raise ValueError(f"unknown ticker: {ticker}")
+        t = normalize_ticker(ticker)
+        if not TICKER_RE.fullmatch(t):
+            raise ValueError(f"not a valid ticker symbol: {ticker!r}")
         # inf/NaN pass a naive `> 0` check but divide into a NaN weight, which the
         # engine would silently return as a zeros analysis. Reject non-finite first.
         if not math.isfinite(amount):
-            raise ValueError(f"amount for {ticker} must be a finite number")
+            raise ValueError(f"amount for {t} must be a finite number")
         if amount <= 0:
-            raise ValueError(f"amount for {ticker} must be > 0")
+            raise ValueError(f"amount for {t} must be > 0")
         if amount > _MAX_AMOUNT:
-            raise ValueError(f"amount for {ticker} exceeds the maximum of {_MAX_AMOUNT:.0f}")
-    return v
+            raise ValueError(f"amount for {t} exceeds the maximum of {_MAX_AMOUNT:.0f}")
+        out[t] = out.get(t, 0.0) + amount
+    # Counted after merging: "aapl" and "AAPL" are one holding, not two.
+    if not (MIN_HOLDINGS <= len(out) <= MAX_HOLDINGS):
+        raise ValueError(f"holdings must contain between {MIN_HOLDINGS} and {MAX_HOLDINGS} "
+                         f"distinct tickers")
+    return out
 
 
 class AnalyzeRequest(BaseModel):
@@ -81,10 +85,19 @@ class Backtest(BaseModel):
     gaussian: BacktestRow
 
 
+class DataInfo(BaseModel):
+    as_of: str
+    window_start: str
+    window_days: int
+    window_status: str
+    crisis_coverage: dict[str, list[str]]
+
+
 class AnalyzeResponse(BaseModel):
     metrics: Metrics
     factors: Factors
     optimizer: Optimizer
+    data: DataInfo
     backtest: Optional[Backtest] = None
 
 

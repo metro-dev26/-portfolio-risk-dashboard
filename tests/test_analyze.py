@@ -1,17 +1,28 @@
 import json
 
-from risk_engine.analyze import analyze_portfolio
+import pytest
+
+from risk_engine.analyze import PortfolioError, analyze_portfolio
 
 HOLDINGS = {"AAPL": 20000, "MSFT": 20000, "JPM": 20000, "XOM": 20000, "TLT": 20000}
 
 
 def test_analyze_returns_expected_structure():
     r = analyze_portfolio(HOLDINGS)
-    assert set(r) == {"metrics", "factors", "optimizer", "backtest"}
+    assert set(r) == {"metrics", "factors", "optimizer", "backtest", "data"}
     assert {"hist_var", "gaussian_var", "sharpe", "annual_vol", "max_drawdown"} <= set(r["metrics"])
     assert set(r["factors"]) == {"betas", "alpha_annual", "r2", "variance_split"}
     assert {"current_sharpe", "max_sharpe_weights", "min_variance_weights", "top_sector"} <= set(r["optimizer"])
     assert set(r["backtest"]) == {"historical", "gaussian"}
+    assert r["data"]["as_of"] == "2026-06-18" and r["data"]["window_status"] == "ok"
+    assert r["data"]["crisis_coverage"]["COVID-19 Crash"] == []
+
+
+def test_unresolvable_ticker_raises_with_reason_per_ticker():
+    with pytest.raises(PortfolioError) as e:
+        analyze_portfolio({"AAPL": 1000, "XYZQQ": 500})
+    assert e.value.problems[0]["ticker"] == "XYZQQ"
+    assert "disabled" in e.value.problems[0]["reason"]     # tests run with live lookups off
 
 
 def test_analyze_values_are_finite_and_sane():
