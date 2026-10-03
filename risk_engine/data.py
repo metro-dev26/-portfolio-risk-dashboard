@@ -310,10 +310,8 @@ def fetch_live(sym, *, get_json=_get_json, timeout=8.0, start="2018-01-01"):
     q = urllib.parse.quote(sym, safe="")
     try:
         p1 = int(dt.datetime.fromisoformat(start).replace(tzinfo=dt.timezone.utc).timestamp())
-    except TypeError:
+    except (TypeError, ValueError, OSError, OverflowError):
         return LiveResult(sym, "unavailable", "invalid start date")
-    except (ValueError, OSError, OverflowError):
-        return LiveResult(sym, "unavailable", "price history came back in an unexpected format")
     p2 = int(time.time())
     try:
         found = get_json("https://query1.finance.yahoo.com/v1/finance/search"
@@ -331,7 +329,7 @@ def fetch_live(sym, *, get_json=_get_json, timeout=8.0, start="2018-01-01"):
                            f"?period1={p1}&period2={p2}&interval=1d", timeout)
     except urllib.error.HTTPError as e:
         return LiveResult(sym, "unavailable", f"data source unavailable (HTTP {e.code})")
-    except Exception as e:
+    except Exception as e:  # network errors, HTTP status, malformed JSON
         return LiveResult(sym, "unavailable", f"data source unavailable ({type(e).__name__})")
     try:
         if not isinstance(payload, dict):
@@ -347,7 +345,9 @@ def fetch_live(sym, *, get_json=_get_json, timeout=8.0, start="2018-01-01"):
         adjclose_list = r.get("indicators", {}).get("adjclose", [])
         if not isinstance(timestamp, list) or not isinstance(adjclose_list, list) or not adjclose_list:
             return LiveResult(sym, "unavailable", "price history came back in an unexpected format")
-        closes = adjclose_list[0].get("adjclose") if isinstance(adjclose_list[0], dict) else adjclose_list[0]
+        if not isinstance(adjclose_list[0], dict) or "adjclose" not in adjclose_list[0]:
+            return LiveResult(sym, "unavailable", "price history came back in an unexpected format")
+        closes = adjclose_list[0].get("adjclose")
         if not isinstance(closes, list):
             return LiveResult(sym, "unavailable", "price history came back in an unexpected format")
         if len(timestamp) != len(closes):
@@ -359,10 +359,6 @@ def fetch_live(sym, *, get_json=_get_json, timeout=8.0, start="2018-01-01"):
         s = s.sort_index()
     except (ValueError, OSError, OverflowError, AttributeError, KeyError, IndexError, TypeError):
         return LiveResult(sym, "unavailable", "price history came back in an unexpected format")
-    try:
-        meta = live_meta(quote)
-    except Exception:
-        return LiveResult(sym, "unavailable", "price history came back in an unexpected format")
     if s.empty:
         return LiveResult(sym, "not_found", "no price history on Yahoo Finance")
-    return LiveResult(sym, "ok", "", s, meta)
+    return LiveResult(sym, "ok", "", s, live_meta(quote))

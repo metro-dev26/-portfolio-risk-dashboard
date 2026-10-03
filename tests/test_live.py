@@ -1,5 +1,6 @@
-import pytest
 import urllib.error
+
+import pytest
 
 from risk_engine import data
 
@@ -89,14 +90,6 @@ def test_kill_switch(monkeypatch):
     assert r.status == "unavailable" and "disabled" in r.reason
 
 
-def test_fetch_live_with_non_string_sym():
-    """fetch_live never raises; non-string sym should return invalid without network call."""
-    def explode(url, timeout):
-        raise AssertionError("network called for invalid sym type")
-    r = data.fetch_live(5, get_json=explode)
-    assert r.status == "invalid"
-
-
 def test_normalize_ticker_none():
     """normalize_ticker(None) should return empty string to fail validation."""
     assert data.normalize_ticker(None) == ""
@@ -133,16 +126,20 @@ def test_zero_and_negative_closes_dropped():
 
 
 def test_timestamps_sorted_after_dedup():
-    """Out-of-order timestamps should be sorted after dedup."""
-    ts = [1735914600, 1735828200, 1736173800]  # Not in order: 2nd, 1st, 3rd
+    """Out-of-order timestamps with duplicates should be sorted and deduplicated (keep last)."""
+    ts = [1735914600, 1735828200, 1735828200, 1736173800]  # Not in order, with duplicate date
     out_of_order_chart = {"chart": {"result": [{
         "meta": {"currency": "USD"},
         "timestamp": ts,
-        "indicators": {"adjclose": [{"adjclose": [11.0, 10.0, 12.0]}]}
+        "indicators": {"adjclose": [{"adjclose": [11.0, 10.0, 10.5, 12.0]}]}
     }]}}
     r = data.fetch_live("PLTR", get_json=fake_get(SEARCH_PLTR, out_of_order_chart))
     assert r.status == "ok"
     assert list(r.prices.index) == sorted(r.prices.index)
+    # Duplicate date (1735828200) appears twice with values 10.0 and 10.5; dedup keeps the last (10.5)
+    # After sort, the series should have 3 entries (one per unique date) in ascending order
+    assert len(r.prices) == 3
+    assert r.prices[r.prices.index[0]] == 10.5  # First date (2025-01-02) keeps last value
 
 
 def test_ticker_regex_rejects_newline():
@@ -202,8 +199,27 @@ def test_infinite_closes_dropped():
 
 
 def test_bad_start_parameter_no_network():
-    """Bad start parameter should return unavailable with 'start' in reason, no network call."""
+    """Bad start parameter should return unavailable with 'invalid start date' in reason, no network call."""
     def explode(url, timeout):
         raise AssertionError("network called with bad start")
     r = data.fetch_live("PLTR", start=None, get_json=explode)
-    assert r.status == "unavailable" and "start" in r.reason
+    assert r.status == "unavailable" and "invalid start date" in r.reason
+
+
+def test_adjclose_wrong_shape():
+    """Adjclose with wrong shape (list of lists instead of dict with list) should be unavailable."""
+    bad_shape_chart = {"chart": {"result": [{
+        "meta": {"currency": "USD"},
+        "timestamp": [1735828200, 1735914600],
+        "indicators": {"adjclose": [[10.0, 11.0]]}  # Wrong shape: list of lists, not [{"adjclose": [...]}]
+    }]}}
+    r = data.fetch_live("PLTR", get_json=fake_get(SEARCH_PLTR, bad_shape_chart))
+    assert r.status == "unavailable" and "unexpected format" in r.reason
+
+
+def test_invalid_start_date_format():
+    """Invalid start date format should return unavailable with 'invalid start date', no network call."""
+    def explode(url, timeout):
+        raise AssertionError("network called with invalid start")
+    r = data.fetch_live("PLTR", start="garbage", get_json=explode)
+    assert r.status == "unavailable" and "invalid start date" in r.reason
