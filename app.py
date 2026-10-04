@@ -10,6 +10,7 @@ each US trading day. Nothing is hardcoded.
 """
 
 import html
+import time
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -178,7 +179,8 @@ if mode == "📖 Beginner's Guide":
     <div class='insight'>
         <div class='insight-icon'>1️⃣</div>
         <div class='insight-text'><strong>Build your portfolio.</strong> Switch to the Dashboard tab. In the
-        left panel, pick the stocks and bonds you hold (or want to test) and type how much money is in each.</div>
+        left panel, paste, upload or search for the stocks and funds you hold (or want to test),
+        with the dollar amount in each.</div>
     </div>
     <div class='insight'>
         <div class='insight-icon'>2️⃣</div>
@@ -292,29 +294,45 @@ class _Transient(Exception):
 
 
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
-def _live_cached(sym):
+def _live_settled(sym):
     result = data.fetch_live(sym)
     if result.status == "unavailable":
         raise _Transient(result)
     return result
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def _live(sym):
+    """Yahoo is asked at most once a minute for a ticker it could not answer, and
+    answers it did give are kept for six hours."""
     try:
-        return _live_cached(sym)
+        return _live_settled(sym)
     except _Transient as transient:
         return transient.result
 
 
-def _last_price(sym):
-    if sym in snap.prices.columns:
-        s = snap.prices[sym].dropna()
-        return float(s.iloc[-1]) if len(s) else None
-    r = _live(sym)
-    return float(r.prices.iloc[-1]) if r.status == "ok" else None
+def _csv_pricer():
+    """Values share counts at the latest close. Tickers outside the dataset need a live
+    lookup, so one CSV gets the same cap and time budget as the holdings table."""
+    started, looked_up = time.monotonic(), set()
+
+    def last_price(sym):
+        if sym in snap.prices.columns:
+            series = snap.prices[sym].dropna()
+            return float(series.iloc[-1]) if len(series) else None
+        if sym not in looked_up:
+            if len(looked_up) >= LIVE_MAX_UI or time.monotonic() - started > LIVE_BUDGET_UI_S:
+                return None
+            looked_up.add(sym)
+        result = _live(sym)
+        return float(result.prices.iloc[-1]) if result.status == "ok" else None
+
+    return last_price
 
 
 CONFIDENCE_LEVELS = {"90%": 0.90, "95%": 0.95, "99%": 0.99}
+CSV_MAX_BYTES = 2 * 1024 * 1024
+UNKNOWN_FUND_SECTOR = "Fund (holdings unknown)"
 EXAMPLE = {"AAPL": 20000.0, "MSFT": 20000.0, "JPM": 20000.0, "XOM": 20000.0, "TLT": 20000.0}
 
 if "holdings" not in st.session_state:
@@ -348,9 +366,13 @@ with st.sidebar:
             _replace_holdings(importer.parse_paste(_txt))
     with tab_csv:
         _up = st.file_uploader("Broker export (.csv)", type="csv", key="csv_up")
-        if _up is not None and st.button("Load CSV", key="load_csv"):
+        if _up is not None and _up.size > CSV_MAX_BYTES:
+            st.error(f"That file is {_up.size / 1048576:.1f} MB; the limit is "
+                     f"{CSV_MAX_BYTES // 1048576} MB. A holdings export is far smaller, so "
+                     f"check it is the right file.")
+        elif _up is not None and st.button("Load CSV", key="load_csv"):
             _replace_holdings(importer.parse_csv(
-                _up.getvalue().decode("utf-8-sig", errors="replace"), last_price=_last_price))
+                _up.getvalue().decode("utf-8-sig", errors="replace"), last_price=_csv_pricer()))
     with tab_search:
         _pick = st.selectbox("Find a ticker", sorted(snap.universe), index=None,
                              format_func=lambda t: f"{t} — {snap.universe[t]['name']}",
@@ -361,7 +383,8 @@ with st.sidebar:
         if st.button("Add holding", key="add_holding"):
             _sym = (_other or _pick or "").strip()
             if _sym:
-                _base = {} if st.session_state.is_example else dict(st.session_state.holdings)
+                _base = {} if st.session_state.is_example else dict(
+                    st.session_state.get("table_holdings", st.session_state.holdings))
                 _replace_holdings(importer.from_rows(list(_base.items()) + [(_sym, _amt)]))
 
     if st.session_state.is_example:
@@ -381,6 +404,7 @@ with st.sidebar:
         "Confidence level", options=list(CONFIDENCE_LEVELS), value="95%")]
 
 _parsed = importer.from_rows(list(zip(_edited["Ticker"], _edited["Amount $"])))
+st.session_state.table_holdings = _parsed.holdings
 _notes = st.session_state.import_notes + _parsed.notes
 if len(_parsed.holdings) > MAX_HOLDINGS:
     st.error(f"This tool analyses up to {MAX_HOLDINGS} holdings; the table has "
@@ -392,11 +416,16 @@ with st.spinner("Looking up tickers outside the dataset..."):
                                      max_live=LIVE_MAX_UI, budget_s=LIVE_BUDGET_UI_S)
 
 if res.rejected or _notes:
-    _items = "".join(f"<li><b>{html.escape(r.ticker)}</b> — {html.escape(r.reason)} · "
-                     f"${r.amount:,.0f} excluded</li>" for r in res.rejected)
-    _items += "".join(f"<li>{html.escape(n)}</li>" for n in _notes)
-    st.sidebar.markdown(f"""<div class='insight warn'><div class='insight-text'>
-        <strong>Not included</strong><ul>{_items}</ul></div></div>""", unsafe_allow_html=True)
+    _lists = ""
+    if res.rejected:
+        _lists += "<strong>Not included</strong><ul>" + "".join(
+            f"<li><b>{html.escape(r.ticker)}</b> — {html.escape(r.reason)} · "
+            f"${r.amount:,.0f} excluded</li>" for r in res.rejected) + "</ul>"
+    if _notes:
+        _lists += "<strong>Import notes</strong><ul>" + "".join(
+            f"<li>{html.escape(n)}</li>" for n in _notes) + "</ul>"
+    st.sidebar.markdown(f"<div class='insight warn'><div class='insight-text'>{_lists}</div></div>",
+                        unsafe_allow_html=True)
 
 if snap.warning:
     st.warning(snap.warning)
@@ -423,7 +452,9 @@ if win.status == "short":
     st.warning(win.message)
 lr = win.returns
 prices = res.prices
-st.query_params["p"] = importer.encode_share(res.holdings)
+_link = importer.encode_share(res.holdings)
+if st.query_params.get("p") != _link:
+    st.query_params["p"] = _link
 
 # ── RISK ENGINE ───────────────────────────────────────────────
 ret_sel = lr[selected].dropna()
@@ -471,7 +502,7 @@ with c1:
     st.markdown(f"""<div class='big-stat'>
         <div class='big-stat-label'>Historical CVaR</div>
         <div class='big-stat-num' style='color:#ff3d5a;'>${abs(h_cvar*port_val):,.0f}</div>
-        <div class='big-stat-sub'>average loss on the worst {int((1-conf)*100)}% of days</div>
+        <div class='big-stat-sub'>average loss on the worst {int(round((1 - conf) * 100))}% of days</div>
         </div>""", unsafe_allow_html=True)
 with c2:
     st.markdown(f"""<div class='big-stat'>
@@ -669,6 +700,10 @@ st.markdown("<div class='sec'>Stress test — how this exact portfolio would hav
 st.caption("Buy-and-hold your current holdings & weights through real historical crash windows. This is what risk managers actually do — past distributions break, so you pressure-test against the real thing.")
 
 
+CRISIS_COLOR = {"2018 Q4 Selloff": "#ffb347", "COVID-19 Crash": "#ff3d5a",
+                "2022 Bear Market": "#4d9fff", "2025 Tariff Shock": "#05d69e"}
+
+
 def stress(window_start, window_end):
     """Buy-and-hold the selected portfolio across a window. Returns (total_return,
     max_drawdown, worst_day, value_path) or None if the window isn't fully covered."""
@@ -703,11 +738,10 @@ if results:
 
     # Rebased value paths through each crisis
     sfig = go.Figure()
-    palette = ["#ffb347", "#ff3d5a", "#4d9fff"]
-    for (label, _, (_, _, _, path)), color in zip(results, palette):
+    for label, _, (_, _, _, path) in results:
         sfig.add_trace(go.Scatter(
             x=list(range(len(path))), y=(path.values - 1) * 100,
-            mode="lines", name=label, line=dict(color=color, width=2)))
+            mode="lines", name=label, line=dict(color=CRISIS_COLOR[label], width=2)))
     sfig.add_hline(y=0, line_color="#5a7088", line_width=1)
     sfig.update_layout(plot_bgcolor="#0c1220", paper_bgcolor="#0c1220",
                        font=dict(color="#dde4f0", family="DM Sans"),
@@ -1105,19 +1139,29 @@ else:
 
     # Diversification / concentration insight
     sec_w = {}
-    eq_w = 0.0
+    eq_w = fund_w = 0.0
     for i, t in enumerate(selected):
+        if SECTOR[t] == UNKNOWN_FUND_SECTOR:
+            fund_w += weights[i]
+            continue
         sec_w[SECTOR[t]] = sec_w.get(SECTOR[t], 0.0) + weights[i]
         if ASSET_CLASS[t] == "Equity":
             eq_w += weights[i]
-    top_sec = max(sec_w, key=sec_w.get)
-    top_sec_pct = sec_w[top_sec] * 100
+    if sec_w:
+        top_sec = max(sec_w, key=sec_w.get)
+        top_sec_pct = sec_w[top_sec] * 100
+        conc_txt = (f"you're <strong>{top_sec_pct:.0f}% concentrated in {html.escape(top_sec)}</strong> "
+                    f"and {eq_w*100:.0f}% in equities overall.")
+    else:
+        top_sec_pct, conc_txt = 0.0, ""
+    fund_txt = (f"{fund_w*100:.0f}% is in funds whose holdings aren't known here, so it is left "
+                f"out of that check." if fund_w else "")
 
     # Biggest suggested moves, in plain language
     deltas = (w_ms - weights)
     add_idx = [i for i in np.argsort(deltas)[::-1] if deltas[i] > 0.01][:2]
     trim_idx = [i for i in np.argsort(deltas) if deltas[i] < -0.01][:2]
-    add_txt = ", ".join(f"{selected[i]} ({SECTOR[selected[i]]})" for i in add_idx) or "none"
+    add_txt = ", ".join(f"{selected[i]} ({html.escape(SECTOR[selected[i]])})" for i in add_idx) or "none"
     trim_txt = ", ".join(selected[i] for i in trim_idx) or "none"
 
     conc = "danger" if top_sec_pct >= 50 else "warn"
@@ -1125,8 +1169,7 @@ else:
     <div class='insight {conc}'>
         <div class='insight-icon'>{"⚠️" if top_sec_pct >= 50 else "🧭"}</div>
         <div class='insight-text'>
-            <strong>Diversification check:</strong> you're <strong>{top_sec_pct:.0f}% concentrated in {top_sec}</strong>
-            and {eq_w*100:.0f}% in equities overall. To climb toward the best risk-adjusted mix, the
+            <strong>Diversification check:</strong> {conc_txt} {fund_txt} To climb toward the best risk-adjusted mix, the
             optimizer would <strong>add to {add_txt}</strong> and <strong>trim {trim_txt}</strong> —
             lifting your Sharpe from <strong>{cur_s:.2f}</strong> to <strong>{ms_s:.2f}</strong>
             ({"more return for the same risk" if ms_s > cur_s else "already near optimal"}).
