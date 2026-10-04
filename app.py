@@ -19,7 +19,7 @@ warnings.filterwarnings("ignore")
 try:
     import truststore
     truststore.inject_into_ssl()
-except Exception:
+except ImportError:   # truststore is optional; a failed injection still surfaces
     pass
 
 import streamlit as st
