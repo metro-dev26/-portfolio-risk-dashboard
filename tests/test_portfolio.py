@@ -45,7 +45,7 @@ def test_live_cap_and_time_budget():
     r = portfolio.resolve_holdings(many, s, live_fetch=ok_live(base), max_live=5)
     assert len(r.tickers) == 5
     assert [x.ticker for x in r.rejected] == ["ZZ5", "ZZ6"]
-    assert all("max 5" in x.reason for x in r.rejected)
+    assert all(x.reason == "too many tickers outside the dataset (max 5)" for x in r.rejected)
 
     ticks = iter([0.0, 0.0, 11.0, 11.0, 11.0])
     r2 = portfolio.resolve_holdings({"ZZ1": 1, "ZZ2": 1}, s, live_fetch=ok_live(base),

@@ -77,8 +77,8 @@ def resolve_holdings(holdings, snap, *, live_fetch=None, max_live=LIVE_MAX_API,
             rejected[t] = Rejection(t, amount, "not a valid ticker symbol")
             continue
         if n_live >= max_live:
-            rejected[t] = Rejection(t, amount, f"too many tickers outside the dataset "
-                                               f"in one request (max {max_live})")
+            rejected[t] = Rejection(t, amount,
+                                    f"too many tickers outside the dataset (max {max_live})")
             continue
         if clock() - started > budget_s:
             rejected[t] = Rejection(t, amount, "lookup time budget used up — try again")
