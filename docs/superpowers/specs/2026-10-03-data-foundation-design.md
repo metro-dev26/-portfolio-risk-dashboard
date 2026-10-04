@@ -72,6 +72,7 @@ universe, and make every data failure visible instead of silent.
 | (silent) | UI live cap 20 / 40 s | Imported portfolios can hold several non-S&P names; results are cached for 6 h per ticker. |
 | Step 0 tests Render | Render is checked in the post-deploy matrix (Task 13) | No zero-cost way to run a probe on Render's free tier; the live path degrades to a clean 422 if blocked. |
 | Editable table adds Sector and Source columns | Not added | The table renders before tickers resolve, so those columns would show the previous run's data; the reallocation table shows each holding's type and sector; whether a ticker came from the snapshot or a live lookup is not shown. |
+| Bad-tick rule scans each ticker's full history | The bad-print rule judges only the latest 20 rows (`QUALITY_WINDOW_ROWS`); the stale rule is unchanged | A full-history rescan turned real historical moves into permanent quarantines (HOOD, 2021-08-04: +50.4% then −27.6%). Accepted cost: a bad print Yahoo never corrects publishes once it is older than 20 rows. |
 
 ## Data flow
 
@@ -194,7 +195,6 @@ timeouts. The stored-XSS note on the saved-portfolio `name` field still stands.
 
 ETF look-through, effective holdings, single-stock check (2) · volatility/regime
 model, clustering (3) · diversification page (4) · panic replay (5) · LLM layer (6).
-| Bad-tick rule scans each ticker's full history | The bad-print rule judges only the latest 20 rows (`QUALITY_WINDOW_ROWS`); the stale rule is unchanged | A full-history rescan turned real historical moves into permanent quarantines (HOOD, 2021-08-04: +50.4% then −27.6%). Accepted cost: a bad print Yahoo never corrects publishes once it is older than 20 rows. |
 
 ## Step 0 results (2026-10-03)
 
