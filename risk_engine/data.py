@@ -245,15 +245,6 @@ def freshness_line(snap):
     return line
 
 
-def load_prices(prefer_live=False):
-    """Legacy (prices, log_returns, label) view for callers not yet on
-    risk_engine.portfolio. `prefer_live` is accepted and ignored."""
-    snap = load_snapshot()
-    prices = snap.prices.ffill().dropna()
-    lr = np.log(prices / prices.shift(1)).dropna()
-    return prices, lr, f"{snap.source} snapshot · {snap.as_of}"
-
-
 TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-^=]{0,10}\Z")
 _CLASS_SHARE = re.compile(r"^[A-Z]{1,5}\.[A-Z]$")
 

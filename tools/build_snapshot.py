@@ -61,7 +61,7 @@ def _parse_table(html):
         sector = GICS_TO_YAHOO.get(str(r["GICS Sector"]).strip())
         if sector is None:
             unmapped.append(ticker)
-        rows.append((ticker, str(r["Security"]).strip(), sector or "Unknown"))
+        rows.append((ticker, str(r["Security"]).strip(), sector or data.UNKNOWN_SECTOR))
     return rows, skipped, sorted(unmapped)
 
 

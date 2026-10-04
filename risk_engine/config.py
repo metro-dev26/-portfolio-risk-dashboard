@@ -74,21 +74,3 @@ STALE_BUSINESS_DAYS = 3
 
 LIVE_MAX_API, LIVE_BUDGET_API_S = 5, 10.0
 LIVE_MAX_UI, LIVE_BUDGET_UI_S = 20, 40.0
-
-# Legacy 24-ticker universe; removed once app.py, analyze.py and the API read universe.json.
-TICKERS = ["AAPL", "MSFT", "GOOGL", "NVDA", "META", "AMZN",
-           "JPM", "GS", "BAC", "MS", "XOM", "CVX", "COP",
-           "JNJ", "PFE", "UNH", "ABBV", "TSLA", "WMT", "BA",
-           "TLT", "IEF", "AGG", "LQD"]
-SECTOR = {
-    "AAPL": "Technology", "MSFT": "Technology", "GOOGL": "Technology",
-    "NVDA": "Technology", "META": "Technology",
-    "AMZN": "Consumer", "TSLA": "Consumer", "WMT": "Consumer",
-    "JPM": "Financials", "GS": "Financials", "BAC": "Financials", "MS": "Financials",
-    "XOM": "Energy", "CVX": "Energy", "COP": "Energy",
-    "JNJ": "Healthcare", "PFE": "Healthcare", "UNH": "Healthcare", "ABBV": "Healthcare",
-    "BA": "Industrials",
-    "TLT": "Govt Bonds", "IEF": "Govt Bonds", "AGG": "Aggregate Bonds", "LQD": "Corp Bonds",
-}
-BONDS = {"TLT", "IEF", "AGG", "LQD"}
-ASSET_CLASS = {t: ("Bond" if t in BONDS else "Equity") for t in TICKERS}

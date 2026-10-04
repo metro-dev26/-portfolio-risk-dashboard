@@ -1,6 +1,7 @@
-"""One-off: freeze the June 2026 24-ticker data as the bundle every test runs
-against, so swapping the live universe never moves a tested number.
-Run once from the repo root: python tools/make_test_bundle.py"""
+"""One-off: froze the June 2026 24-ticker data as the bundle every test runs
+against (tests/fixtures/snapshot), so swapping the live universe never moves a tested
+number. It read the repo-root prices.csv and factors.csv, which are no longer in the
+repository, so it cannot be re-run."""
 import json
 import os
 import shutil

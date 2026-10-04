@@ -1,5 +1,6 @@
-"""One-off: capture current app outputs for a fixed portfolio as the golden master.
-Run once from the repo root: python tools/snapshot_reference.py
+"""One-off: capture app outputs for a fixed portfolio as the golden master, computed from
+the frozen price fixture tests/fixtures/snapshot/prices.csv.gz.
+Run from the repo root: python tools/snapshot_reference.py
 Regenerate ONLY if the reference behavior is intentionally changed."""
 import json
 import os
@@ -12,7 +13,7 @@ HOLDINGS = ["AAPL", "MSFT", "JPM", "XOM", "TLT"]
 CONF = 0.95
 TRADING_DAYS = 252
 
-prices = pd.read_csv("prices.csv", index_col=0, parse_dates=True).ffill().dropna()
+prices = pd.read_csv("tests/fixtures/snapshot/prices.csv.gz", index_col=0, parse_dates=True).ffill().dropna()
 lr = np.log(prices / prices.shift(1)).dropna()
 
 weights = np.ones(len(HOLDINGS)) / len(HOLDINGS)
