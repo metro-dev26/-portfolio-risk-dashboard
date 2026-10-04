@@ -386,8 +386,7 @@ with st.sidebar:
                     st.session_state.get("table_holdings", st.session_state.holdings))
                 _replace_holdings(importer.from_rows(list(_base.items()) + [(_sym, _amt)]))
 
-    if st.session_state.is_example:
-        st.caption("Showing an example portfolio — paste, upload or search to use your own.")
+    _example_note = st.empty()
     st.caption("Amounts are US dollars (market value), not share counts.")
     _h = st.session_state.holdings
     _edited = st.data_editor(
@@ -406,6 +405,10 @@ with st.sidebar:
 
 _parsed = importer.from_rows(list(zip(_edited["Ticker"], _edited["Amount $"])))
 st.session_state.table_holdings = _parsed.holdings
+if _parsed.holdings != EXAMPLE:
+    st.session_state.is_example = False
+if st.session_state.is_example:
+    _example_note.caption("Showing an example portfolio — paste, upload or search to use your own.")
 _notes = st.session_state.import_notes + _parsed.notes
 if len(_parsed.holdings) > MAX_HOLDINGS:
     st.error(f"This tool analyses up to {MAX_HOLDINGS} holdings; the table has "

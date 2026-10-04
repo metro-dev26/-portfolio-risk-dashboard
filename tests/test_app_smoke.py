@@ -265,6 +265,27 @@ def test_the_holdings_table_warns_that_the_share_link_carries_the_holdings():
             "people who should see them.") in _sidebar_text(at)
 
 
+def test_add_holding_after_editing_the_example_table_keeps_the_edited_rows():
+    at = AppTest.from_file(APP, default_timeout=60).run()
+    key = f"amounts_{at.session_state['editor_v']}"
+    at.session_state[key] = {"edited_rows": {0: {"Amount $": 12345.0}}, "added_rows": [],
+                             "deleted_rows": [2, 3, 4]}
+    at.run()
+    assert at.session_state["is_example"] is False
+    assert "example portfolio" not in _sidebar_text(at)
+    at.text_input(key="search_other").input("NVDA")
+    at.button(key="add_holding").click().run()
+    assert not at.exception
+    assert at.session_state["holdings"] == {"AAPL": 12345.0, "MSFT": 20000.0, "NVDA": 10000.0}
+
+
+def test_add_holding_to_the_untouched_example_starts_a_new_portfolio():
+    at = AppTest.from_file(APP, default_timeout=60).run()
+    at.text_input(key="search_other").input("NVDA")
+    at.button(key="add_holding").click().run()
+    assert at.session_state["holdings"] == {"NVDA": 10000.0}
+
+
 def test_ninety_percent_confidence_reads_ten_percent_of_days():
     at = AppTest.from_file(APP, default_timeout=60).run()
     at.sidebar.select_slider[0].set_value("90%").run()
