@@ -61,7 +61,7 @@ def test_variance_attribution_allows_negative_factor_fraction():
     other factors. Here b_Mkt is small and negative while SMB carries a large
     positive beta and Mkt-SMB covariance is positive, so the cross-covariance
     term dominates and flips Mkt-RF's own contribution negative. Verified
-    empirically against the real factors.csv (see task report)."""
+    empirically against the real factors.csv."""
     f = fac.load_factors()
     b = np.array([-0.2, 2.3, -0.8])  # Mkt, SMB, HML
     rng = np.random.default_rng(3)

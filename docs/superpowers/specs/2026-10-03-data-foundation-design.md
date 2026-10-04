@@ -71,6 +71,7 @@ universe, and make every data failure visible instead of silent.
 | Response adds `data_as_of`, `window_start`, `crisis_coverage` | Grouped under one `data` object: `as_of`, `window_start`, `window_days`, `window_status`, `crisis_coverage` | One place for provenance; keeps the top-level response shape stable. |
 | (silent) | UI live cap 20 / 40 s | Imported portfolios can hold several non-S&P names; results are cached for 6 h per ticker. |
 | Step 0 tests Render | Render is checked in the post-deploy matrix (Task 13) | No zero-cost way to run a probe on Render's free tier; the live path degrades to a clean 422 if blocked. |
+| Editable table adds Sector and Source columns | Not added | The table renders before tickers resolve, so those columns would show the previous run's data; the "Not included" box and the reallocation table show type and sector. |
 
 ## Data flow
 

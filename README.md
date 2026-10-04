@@ -148,7 +148,8 @@ Run locally:
 **Notes.** Analysis reads a daily-refreshed data bundle (prices, universe, factors),
 with a dated copy in the repository as the fallback when the download fails.
 Tickers outside the bundle are looked up live on Yahoo Finance, at most 5 per
-request within a 10 s budget; a ticker that cannot be used is reported with a
+request. The 10 s budget is checked before each lookup, so one that has already
+started is not cut off. A ticker that cannot be used is reported with a
 reason in a 422. On the free-tier host the service sleeps when idle,
 so the first request after a pause takes ~30–50s to wake. Saved portfolios use
 SQLite on the host's ephemeral filesystem and do not persist across redeploys —
