@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 import streamlit as st
 from streamlit.testing.v1 import AppTest
 
@@ -125,6 +126,13 @@ def _fake_live(sessions=None, **meta):
     return fetch
 
 
+@pytest.fixture
+def fresh_cache():
+    st.cache_data.clear()
+    yield
+    st.cache_data.clear()
+
+
 class _Upload:
     """The part of st.file_uploader's return value the app reads."""
 
@@ -189,6 +197,22 @@ def test_every_crisis_gets_its_own_line_and_colour():
     assert len({t["line"]["color"] for t in traces}) == len(CRISES)
 
 
+def test_stress_section_includes_tariff_shock():
+    at = AppTest.from_file(APP, default_timeout=60).run()
+    assert "2025 Tariff Shock" in _body(at)
+
+
+def test_crisis_note_pairs_each_crisis_with_the_holdings_that_missed_it(monkeypatch, fresh_cache):
+    monkeypatch.setattr(data, "fetch_live", _fake_live(1000))
+    at = _paste(AppTest.from_file(APP, default_timeout=60).run(), "AAPL 10000\nNEWCO 5000")
+    notes = [str(c.value) for c in at.caption if "not yet trading" in str(c.value)]
+    assert len(notes) == 1
+    for label in ("2018 Q4 Selloff", "COVID-19 Crash", "2022 Bear Market"):
+        assert f"{label} (NEWCO)" in notes[0]
+    assert "2025 Tariff Shock" not in notes[0] and "AAPL" not in notes[0]
+    assert "2025 Tariff Shock" in _body(at)
+
+
 def _share_param(at):
     value = at.query_params["p"]
     return value[0] if isinstance(value, list) else value
@@ -232,25 +256,41 @@ def test_ninety_percent_confidence_reads_ten_percent_of_days():
     assert "worst 10% of days" in body and "worst 9%" not in body
 
 
-def test_portfolio_of_funds_with_unknown_holdings_is_not_called_concentrated(monkeypatch):
-    st.cache_data.clear()
-    monkeypatch.setattr(data, "fetch_live", _fake_live(
-        sector="Fund (holdings unknown)", asset_class="Fund", type="etf"))
-    at = _paste(AppTest.from_file(APP, default_timeout=60).run(), "FUNDA 6000\nFUNDB 4000")
+SECTORLESS_QUOTES = {
+    "fund": {"quoteType": "ETF"},
+    "stock with no sector": {"quoteType": "EQUITY"},
+    "index": {"quoteType": "INDEX", "typeDisp": "Index"},
+}
+
+
+def _sectorless_live(kind, symbol="X"):
+    return _fake_live(**data.live_meta({**SECTORLESS_QUOTES[kind], "symbol": symbol}))
+
+
+def _diversification_box(at):
+    return next(str(m.value) for m in at.markdown if "Diversification check" in str(m.value))
+
+
+@pytest.mark.parametrize("kind", SECTORLESS_QUOTES)
+def test_portfolio_of_holdings_with_no_known_sector_is_not_called_concentrated(
+        monkeypatch, fresh_cache, kind):
+    monkeypatch.setattr(data, "fetch_live", _sectorless_live(kind))
+    at = _paste(AppTest.from_file(APP, default_timeout=60).run(), "ZZA 6000\nZZB 4000")
     assert not at.exception
-    body = _body(at)
-    assert "concentrated in Fund" not in body
-    assert "100% is in funds whose holdings aren't known here" in body
+    box = _diversification_box(at)
+    assert "concentrated in" not in box
+    assert "insight danger" not in box
+    assert "100% is in holdings whose sector isn't known here" in box
 
 
-def test_unknown_funds_are_left_out_of_the_sector_check_but_counted(monkeypatch):
-    st.cache_data.clear()
-    monkeypatch.setattr(data, "fetch_live", _fake_live(
-        sector="Fund (holdings unknown)", asset_class="Fund", type="etf"))
-    at = _paste(AppTest.from_file(APP, default_timeout=60).run(), "AAPL 5000\nFUNDA 5000")
-    body = _body(at)
-    assert "50% concentrated in Technology" in body
-    assert "50% is in funds whose holdings aren't known here" in body
+@pytest.mark.parametrize("kind", SECTORLESS_QUOTES)
+def test_holdings_with_no_known_sector_are_left_out_of_the_sector_check_but_counted(
+        monkeypatch, fresh_cache, kind):
+    monkeypatch.setattr(data, "fetch_live", _sectorless_live(kind))
+    at = _paste(AppTest.from_file(APP, default_timeout=60).run(), "AAPL 5000\nZZA 5000")
+    box = _diversification_box(at)
+    assert "50% concentrated in Technology" in box
+    assert "50% is in holdings whose sector isn't known here" in box
 
 
 def test_sector_text_from_yahoo_is_escaped(monkeypatch):
@@ -340,3 +380,8 @@ def test_beginners_guide_describes_the_paste_upload_search_flow():
 def test_dark_theme_is_pinned_so_the_sidebar_is_readable_in_light_mode():
     config_toml = Path(__file__).resolve().parent.parent / ".streamlit" / "config.toml"
     assert tomllib.loads(config_toml.read_text())["theme"]["base"] == "dark"
+
+
+def test_upload_limit_matches_the_two_megabyte_csv_cap():
+    config_toml = Path(__file__).resolve().parent.parent / ".streamlit" / "config.toml"
+    assert tomllib.loads(config_toml.read_text())["server"]["maxUploadSize"] == 2

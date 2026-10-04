@@ -277,16 +277,20 @@ def _get_json(url, timeout):
         return json.loads(r.read())
 
 
+UNKNOWN_SECTOR = "Unknown"
+FUND_SECTOR = "Fund (holdings unknown)"
+
+
 def live_meta(quote):
     quote_type = quote.get("quoteType")
     kind = {"EQUITY": "stock", "ETF": "etf"}.get(quote_type) if isinstance(quote_type, str) else None
     kind = kind or "other"
     if kind == "stock":
         sector_val = quote.get("sector")
-        sector = sector_val if isinstance(sector_val, str) else "Unknown"
+        sector = sector_val if isinstance(sector_val, str) else UNKNOWN_SECTOR
         asset_class = "Equity"
     elif kind == "etf":
-        sector, asset_class = "Fund (holdings unknown)", "Fund"
+        sector, asset_class = FUND_SECTOR, "Fund"
     else:
         type_disp = quote.get("typeDisp")
         sector = type_disp if isinstance(type_disp, str) else "Other"

@@ -332,7 +332,7 @@ def _csv_pricer():
 
 CONFIDENCE_LEVELS = {"90%": 0.90, "95%": 0.95, "99%": 0.99}
 CSV_MAX_BYTES = 2 * 1024 * 1024
-UNKNOWN_FUND_SECTOR = "Fund (holdings unknown)"
+NO_REAL_SECTOR = {data.UNKNOWN_SECTOR, data.FUND_SECTOR}
 EXAMPLE = {"AAPL": 20000.0, "MSFT": 20000.0, "JPM": 20000.0, "XOM": 20000.0, "TLT": 20000.0}
 
 if "holdings" not in st.session_state:
@@ -1139,10 +1139,10 @@ else:
 
     # Diversification / concentration insight
     sec_w = {}
-    eq_w = fund_w = 0.0
+    eq_w = unplaced_w = 0.0
     for i, t in enumerate(selected):
-        if SECTOR[t] == UNKNOWN_FUND_SECTOR:
-            fund_w += weights[i]
+        if SECTOR[t] in NO_REAL_SECTOR or ASSET_CLASS[t] == "Other":
+            unplaced_w += weights[i]
             continue
         sec_w[SECTOR[t]] = sec_w.get(SECTOR[t], 0.0) + weights[i]
         if ASSET_CLASS[t] == "Equity":
@@ -1154,8 +1154,8 @@ else:
                     f"and {eq_w*100:.0f}% in equities overall.")
     else:
         top_sec_pct, conc_txt = 0.0, ""
-    fund_txt = (f"{fund_w*100:.0f}% is in funds whose holdings aren't known here, so it is left "
-                f"out of that check." if fund_w else "")
+    unplaced_txt = (f"{unplaced_w*100:.0f}% is in holdings whose sector isn't known here, so it is "
+                    f"left out of that check." if unplaced_w else "")
 
     # Biggest suggested moves, in plain language
     deltas = (w_ms - weights)
@@ -1169,7 +1169,7 @@ else:
     <div class='insight {conc}'>
         <div class='insight-icon'>{"⚠️" if top_sec_pct >= 50 else "🧭"}</div>
         <div class='insight-text'>
-            <strong>Diversification check:</strong> {conc_txt} {fund_txt} To climb toward the best risk-adjusted mix, the
+            <strong>Diversification check:</strong> {conc_txt} {unplaced_txt} To climb toward the best risk-adjusted mix, the
             optimizer would <strong>add to {add_txt}</strong> and <strong>trim {trim_txt}</strong> —
             lifting your Sharpe from <strong>{cur_s:.2f}</strong> to <strong>{ms_s:.2f}</strong>
             ({"more return for the same risk" if ms_s > cur_s else "already near optimal"}).
