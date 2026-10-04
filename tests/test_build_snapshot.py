@@ -660,6 +660,23 @@ def test_parse_skips_rows_without_a_symbol():
     assert [r[0] for r in bs.parse_sp500(html)] == ["AAPL", "BRK-B"]
 
 
+def test_parse_skips_and_counts_symbols_that_are_not_tickers():
+    html = WIKI.replace("</table>",
+                        "<tr><td>NOT A TICKER</td><td>Odd Corp</td><td>Financials</td></tr>"
+                        "<tr><td>TWELVE-CHARS</td><td>Long Corp</td><td>Financials</td></tr></table>")
+    rows, skipped, _ = bs._parse_table(html)
+    assert [r[0] for r in rows] == ["AAPL", "BRK-B"] and skipped == 2
+
+
+def test_run_leaves_symbols_that_are_not_tickers_out_of_the_universe(tmp_path, small_bounds):
+    html, fetch, factors = _fake_world()
+    html = html.replace("</table>",
+                        "<tr><td>BAD SYMBOL</td><td>Odd Corp</td><td>Financials</td></tr></table>")
+    report = _run_full(tmp_path, html, fetch, factors)
+    assert report["sp500_rows_skipped"] == 1
+    assert "BAD SYMBOL" not in data.read_bundle(str(tmp_path / "out"), "release").universe
+
+
 def test_run_counts_skipped_rows_and_lists_unmapped_sectors(tmp_path, small_bounds):
     html, fetch, factors = _fake_world()
     html = html.replace("</table>",

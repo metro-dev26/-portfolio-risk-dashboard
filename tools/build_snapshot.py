@@ -49,7 +49,8 @@ def _http(url, timeout=30):
 
 def _parse_table(html):
     """-> (rows, skipped, unmapped): the rows parse_sp500 returns, how many table rows
-    had no symbol, and the tickers whose GICS sector has no Yahoo name."""
+    had no symbol or one that is not a valid ticker, and the tickers whose GICS sector
+    has no Yahoo name."""
     # flavor pinned: pandas otherwise retries with html5lib when the table is missing,
     # and the ImportError hides the real problem
     table = pd.read_html(io.StringIO(html), attrs={"id": "constituents"}, flavor="lxml")[0]
@@ -59,6 +60,9 @@ def _parse_table(html):
             skipped += 1
             continue
         ticker = str(r["Symbol"]).strip().replace(".", "-")
+        if not data.TICKER_RE.fullmatch(ticker):
+            skipped += 1
+            continue
         sector = GICS_TO_YAHOO.get(str(r["GICS Sector"]).strip())
         if sector is None:
             unmapped.append(ticker)
