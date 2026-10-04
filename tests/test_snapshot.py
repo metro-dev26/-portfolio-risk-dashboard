@@ -4,9 +4,10 @@ import os
 import shutil
 import time
 
+import numpy as np
 import pytest
 
-from risk_engine import data
+from risk_engine import config, data
 
 FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "snapshot")
 
@@ -22,6 +23,16 @@ def _release_fetcher(src_dir, calls):
 
 def _broken_fetch(url):
     raise OSError("network down")
+
+
+def _release_dir(tmp_path, name, as_of):
+    """A copy of the fixture bundle stamped with a different as_of."""
+    out = tmp_path / name
+    shutil.copytree(FIXTURE, out)
+    report = json.loads((out / "refresh_report.json").read_text())
+    report["as_of"] = as_of
+    (out / "refresh_report.json").write_text(json.dumps(report))
+    return str(out)
 
 
 def test_pinned_dir_wins():
@@ -69,6 +80,58 @@ def test_download_failure_falls_back_with_a_visible_warning(monkeypatch, tmp_pat
     assert "network down" in snap.warning
 
 
+def test_download_failure_prefers_the_last_downloaded_copy(monkeypatch, tmp_path):
+    monkeypatch.delenv("MARKETPLUG_DATA_DIR")
+    cache = tmp_path / "cache"
+    newer = _release_dir(tmp_path, "newer", "2026-06-19")
+    first = data.load_snapshot(release_url="https://x/rel", cache_dir=str(cache),
+                               fetch=_release_fetcher(newer, []), fallback_dir=FIXTURE,
+                               use_memo=False)
+    assert first.source == "release" and first.warning is None
+
+    snap = data.load_snapshot(release_url="https://x/rel", cache_dir=str(cache),
+                              fetch=_broken_fetch, fallback_dir=FIXTURE, use_memo=False)
+    assert snap.source == "cache" and snap.as_of == "2026-06-19"
+    assert "network down" in snap.warning and "2026-06-19" in snap.warning
+    assert "last downloaded copy" in snap.warning
+
+
+def test_unreadable_cache_falls_through_to_the_bundled_copy(monkeypatch, tmp_path):
+    monkeypatch.delenv("MARKETPLUG_DATA_DIR")
+    cache = tmp_path / "cache"
+    data.load_snapshot(release_url="https://x/rel", cache_dir=str(cache),
+                       fetch=_release_fetcher(FIXTURE, []), fallback_dir=FIXTURE, use_memo=False)
+    (cache / "prices.csv.gz").write_bytes(b"not-gzip")
+
+    snap = data.load_snapshot(release_url="https://x/rel", cache_dir=str(cache),
+                              fetch=_broken_fetch, fallback_dir=FIXTURE, use_memo=False)
+    assert snap.source == "fallback"
+    assert "network down" in snap.warning and "bundled copy" in snap.warning
+
+
+def test_cached_copy_is_retried_on_the_fallback_schedule(monkeypatch, tmp_path):
+    monkeypatch.delenv("MARKETPLUG_DATA_DIR")
+    monkeypatch.setattr(data, "_MEMO", {})
+    cache = tmp_path / "cache"
+    data.load_snapshot(release_url="https://x/rel", cache_dir=str(cache),
+                       fetch=_release_fetcher(FIXTURE, []), fallback_dir=FIXTURE, use_memo=False)
+
+    down = data.load_snapshot(release_url="https://x/rel", cache_dir=str(cache),
+                              fetch=_broken_fetch, fallback_dir=FIXTURE, max_age_s=3600)
+    assert down.source == "cache"
+
+    calls = []
+    soon = data.load_snapshot(release_url="https://x/rel", cache_dir=str(cache),
+                              fetch=_release_fetcher(FIXTURE, calls), fallback_dir=FIXTURE,
+                              max_age_s=3600, clock=lambda: time.time() + 10)
+    assert soon.source == "cache" and calls == []        # inside the retry window: memoized
+
+    later = data.load_snapshot(release_url="https://x/rel", cache_dir=str(cache),
+                               fetch=_release_fetcher(FIXTURE, calls), fallback_dir=FIXTURE,
+                               max_age_s=3600, clock=lambda: time.time() + 301)
+    assert calls and later.source == "cache" and later.warning is None   # retried, same as_of
+
+
 def test_missing_fallback_raises_loudly(monkeypatch, tmp_path):
     monkeypatch.delenv("MARKETPLUG_DATA_DIR")
     with pytest.raises(data.SnapshotUnavailable, match="missing"):
@@ -94,7 +157,7 @@ def test_freshness_line_names_quarantined_tickers():
 
 
 def test_corrupt_download_does_not_poison_cache(monkeypatch, tmp_path):
-    """Load 1: release A. Load 2: release B with corrupt prices → fallback. Load 3: release B good."""
+    """Load 1: release A. Load 2: release B with corrupt prices → cached A. Load 3: release B good."""
     monkeypatch.delenv("MARKETPLUG_DATA_DIR")
     cache = tmp_path / "cache"
 
@@ -104,7 +167,7 @@ def test_corrupt_download_does_not_poison_cache(monkeypatch, tmp_path):
                                fetch=_release_fetcher(FIXTURE, calls), use_memo=False)
     assert snap1.source == "release" and snap1.as_of == "2026-06-18"
 
-    # Load 2: release B (as_of 2026-06-19) with corrupt prices.csv.gz → fallback
+    # Load 2: release B (as_of 2026-06-19) with corrupt prices.csv.gz → last good download
     corrupt_dir = tmp_path / "corrupt"
     shutil.copytree(FIXTURE, corrupt_dir)
     report = json.loads((corrupt_dir / "refresh_report.json").read_text())
@@ -114,7 +177,7 @@ def test_corrupt_download_does_not_poison_cache(monkeypatch, tmp_path):
     calls.clear()
     snap2 = data.load_snapshot(release_url="https://x/rel", cache_dir=str(cache),
                                fetch=_release_fetcher(str(corrupt_dir), calls), use_memo=False)
-    assert snap2.source == "fallback"
+    assert snap2.source == "cache" and snap2.as_of == "2026-06-18"
 
     # Load 3: release B good (as_of 2026-06-19) → should return release
     good_b_dir = tmp_path / "good_b"
@@ -246,3 +309,28 @@ def test_read_bundle_on_non_dict_report(tmp_path):
     # read_bundle must raise SnapshotUnavailable, not TypeError
     with pytest.raises(data.SnapshotUnavailable, match="unreadable|dict"):
         data.read_bundle(str(bad_dir), "test")
+
+
+def test_unreadable_cache_and_fallback_name_every_failure(monkeypatch, tmp_path):
+    monkeypatch.delenv("MARKETPLUG_DATA_DIR")
+    cache = tmp_path / "cache"
+    data.load_snapshot(release_url="https://x/rel", cache_dir=str(cache),
+                       fetch=_release_fetcher(FIXTURE, []), fallback_dir=FIXTURE, use_memo=False)
+    (cache / "prices.csv.gz").write_bytes(b"not-gzip")
+    with pytest.raises(data.SnapshotUnavailable) as exc_info:
+        data.load_snapshot(release_url="https://x/rel", cache_dir=str(cache), fetch=_broken_fetch,
+                           fallback_dir=str(tmp_path / "nope"), use_memo=False)
+    msg = str(exc_info.value)
+    assert "network down" in msg                       # the download
+    assert str(cache) in msg and "prices.csv.gz" in msg  # the cached copy
+    assert "nope" in msg                               # the bundled copy
+
+
+def test_bundled_fallback_reads_cleanly():
+    """data/fallback/ is replaced by newer bundles over time, so nothing here pins a
+    ticker count or a date."""
+    snap = data.read_bundle(data.FALLBACK_DIR, "fallback")
+    assert config.BENCHMARK in snap.prices.columns
+    dt.date.fromisoformat(snap.as_of)
+    last = snap.prices.ffill().iloc[-1]
+    assert np.isfinite(last).all() and (last > 0).all()

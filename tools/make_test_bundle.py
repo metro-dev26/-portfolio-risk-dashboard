@@ -1,4 +1,4 @@
-"""One-off: froze the June 2026 24-ticker data as the bundle every test runs
+"""One-off: froze the June 2026 25-ticker data as the bundle every test runs
 against (tests/fixtures/snapshot), so swapping the live universe never moves a tested
 number. It read the repo-root prices.csv and factors.csv, which are no longer in the
 repository, so it cannot be re-run."""

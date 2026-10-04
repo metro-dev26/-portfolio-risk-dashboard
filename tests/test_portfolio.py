@@ -64,12 +64,12 @@ def test_quarantined_ticker_is_rejected_not_looked_up():
     assert r.rejected[0].ticker == "XOM" and "bad print" in r.rejected[0].reason
 
 
-def test_window_matches_legacy_returns_for_full_history_portfolio(market):
-    _, legacy_lr = market
+def test_window_equals_full_history_returns_when_every_holding_has_full_history(market):
+    _, reference_lr = market    # the full-history log-return panel
     r = portfolio.resolve_holdings({t: 1.0 for t in HOLDINGS}, snap())
     w = portfolio.portfolio_window(r.prices, r.tickers)
     assert w.status == "ok"
-    diff = (w.returns[HOLDINGS] - legacy_lr[HOLDINGS]).abs().max().max()
+    diff = (w.returns[HOLDINGS] - reference_lr[HOLDINGS]).abs().max().max()
     assert diff < 1e-12
 
 

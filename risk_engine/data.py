@@ -1,6 +1,6 @@
 """Market data access. Snapshot first: a bundle built daily by a GitHub Action and
-published as a release, cached on local disk, with a dated bundle in the repo as
-the fallback when the download fails. Pure — no UI."""
+published as a release, cached on local disk. When the download fails, the last
+cached download is used, then a dated bundle in the repo. Pure — no UI."""
 import dataclasses
 import datetime as dt
 import gzip
@@ -25,8 +25,10 @@ _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FALLBACK_DIR = os.path.join(_REPO, "data", "fallback")
 BUNDLE_FILES = ("prices.csv.gz", "universe.json", "factors.csv", "refresh_report.json")
 FALLBACK_RETRY_S = 300
-# Labels live_meta gives a holding Yahoo cannot place in a sector; the app leaves
-# them out of the sector-concentration check.
+# Sector labels for holdings with no real sector: live_meta gives UNKNOWN_SECTOR to a stock
+# Yahoo has no sector for and FUND_SECTOR to an ETF, and tools/build_snapshot.py gives
+# UNKNOWN_SECTOR to an S&P 500 row whose GICS sector has no Yahoo name. The app leaves
+# both out of the sector-concentration check.
 UNKNOWN_SECTOR = "Unknown"
 FUND_SECTOR = "Fund (holdings unknown)"
 OTHER_ASSET_CLASS = "Other"
@@ -182,14 +184,38 @@ def _from_release(release_url, cache_dir, fetch):
 _MEMO = {}
 
 
+def _older_copy(failure, cache_dir, fallback_dir):
+    """The best bundle available after a failed download: the last good download in
+    the cache, else the bundled copy. The warning says which, and why."""
+    why = f"Could not download today's data ({type(failure).__name__}: {failure}); "
+    cache_err = None
+    if _bundle_complete(cache_dir):
+        try:
+            cached = read_bundle(cache_dir, "cache")
+            return dataclasses.replace(
+                cached, warning=why + f"showing the last downloaded copy "
+                                      f"(prices as of {cached.as_of}).")
+        except SnapshotUnavailable as e:
+            cache_err = e
+    try:
+        bundled = read_bundle(fallback_dir, "fallback")
+    except SnapshotUnavailable as fallback_err:
+        cache_note = f"; cached copy also unreadable ({cache_err})" if cache_err else ""
+        raise SnapshotUnavailable(
+            f"Release failed ({type(failure).__name__}: {failure}){cache_note}; "
+            f"fallback also failed ({fallback_err})") from failure
+    return dataclasses.replace(bundled, warning=why + "showing the bundled copy instead.")
+
+
 def load_snapshot(*, data_dir=None, release_url=DATA_RELEASE_URL, cache_dir=None,
                   fallback_dir=FALLBACK_DIR, fetch=_download, max_age_s=3600, use_memo=True,
                   clock=time.time):
     """Return the freshest readable bundle. Raises SnapshotUnavailable only when
-    even the bundled fallback can't be read.
+    the download, the cached copy and the bundled fallback all fail.
 
-    Memoizes per (release_url, cache_dir, fallback_dir). Release/cache results
-    memoized for max_age_s; fallback results for FALLBACK_RETRY_S (300s).
+    Memoizes per (release_url, cache_dir, fallback_dir). A successful download is
+    memoized for max_age_s; a copy served after a failed download (cached or bundled)
+    for FALLBACK_RETRY_S (300s), so the download is retried soon.
     clock parameter is for testability."""
     pinned = data_dir or os.environ.get("MARKETPLUG_DATA_DIR")
     if pinned:
@@ -199,32 +225,22 @@ def load_snapshot(*, data_dir=None, release_url=DATA_RELEASE_URL, cache_dir=None
     memo_key = (release_url, cache_dir, fallback_dir)
     now = clock()
 
-    # Check memo: different TTL for fallback vs release/cache
+    # A copy served after a failed download is retried sooner than a successful one
     if use_memo and memo_key in _MEMO:
-        snap, at, is_fallback = _MEMO[memo_key]
-        ttl = FALLBACK_RETRY_S if is_fallback else max_age_s
+        snap, at, after_failure = _MEMO[memo_key]
+        ttl = FALLBACK_RETRY_S if after_failure else max_age_s
         if now - at < ttl:
             return snap
 
     try:
         snap = _from_release(release_url, cache_dir, fetch)
-        is_fallback = False
-    except Exception as e:  # network, HTTP status, bad JSON or a corrupt file: use the fallback
-        try:
-            snap = read_bundle(fallback_dir, "fallback")
-            snap = dataclasses.replace(
-                snap,
-                warning=f"Could not download today's data ({type(e).__name__}: {e}); "
-                        f"showing the bundled copy instead.")
-            is_fallback = True
-        except SnapshotUnavailable as fallback_err:
-            # Both release and fallback failed; include both in the message
-            raise SnapshotUnavailable(
-                f"Release failed ({type(e).__name__}: {e}); "
-                f"fallback also failed ({fallback_err})") from e
+        after_failure = False
+    except Exception as e:  # network, HTTP status, bad JSON or a corrupt file: use an older copy
+        snap = _older_copy(e, cache_dir, fallback_dir)
+        after_failure = True
 
     if use_memo:
-        _MEMO[memo_key] = (snap, now, is_fallback)
+        _MEMO[memo_key] = (snap, now, after_failure)
     return snap
 
 

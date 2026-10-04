@@ -44,10 +44,10 @@ USD-listed tickers. The application provides:
   release. Tickers with suspected bad prints or no recent closes are held back and named;
   if more than 2% of tickers fail or are held back, nothing is published and the previous
   day's data stays up.
-- **Fallback:** when the bundle cannot be downloaded, a small dated bundle in `data/fallback/`
-  is used and the app says so.
-- **Freshness is always shown:** the dashboard header states the data date, how many tickers
-  are current, and which are held back, and a banner appears when the data is more than three
+- **Fallback:** when the bundle cannot be downloaded, the last downloaded copy is used if one
+  is cached, else a dated copy of the bundle in `data/fallback/`; the app says which.
+- **Freshness is shown:** the dashboard header states the data date, how many tickers are
+  current, and which are held back, and a banner appears when the data is more than three
   business days old.
 - **Portfolio input:** 2 to 50 holdings. Paste `TICKER AMOUNT` lines, upload a broker CSV
   (Symbol/Ticker plus Market Value, Value or Quantity columns), or search. Anything that
@@ -121,9 +121,9 @@ python -m streamlit run app.py
 ```
 
 Prices come from the daily data bundle, downloaded from the `data-latest` release and cached
-locally. A small dated bundle (25 tickers) in `data/fallback/` is used when the download
-fails, and the app labels it. Tickers outside the bundle are looked up live from the Yahoo
-Finance chart API via `urllib`. No API keys are required.
+locally. When the download fails, the last cached download is used, else a dated copy of the
+bundle in `data/fallback/`, and the app labels it. Tickers outside the bundle are looked up
+live from the Yahoo Finance chart API via `urllib`. No API keys are required.
 
 ## Tech Stack
 
