@@ -5,10 +5,11 @@ A focused tool for measuring portfolio downside risk the way professionals do �
 with real market data, historical (non-Gaussian) tail risk, and the honest gap
 between what standard models assume and what the market actually does.
 
-Every number on this page is computed live from real market data.
-Nothing is hardcoded.
+Every number on this page is computed from end-of-day market data refreshed
+each US trading day. Nothing is hardcoded.
 """
 
+import html
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -26,11 +27,14 @@ import pandas as pd
 import plotly.graph_objects as go
 from scipy.stats import norm
 
-from risk_engine.data import load_prices
+from risk_engine import data, importer, portfolio
 from risk_engine import metrics
 from risk_engine import optimize
 from risk_engine import backtest
 from risk_engine import factors as fac
+from risk_engine.config import (BACKTEST_MIN_OBS, BENCHMARK, CRISES, FACTOR_MIN_OBS,
+                                LIVE_BUDGET_UI_S, LIVE_MAX_UI, MAX_HOLDINGS,
+                                MIN_HOLDINGS, TRADING_DAYS)
 
 st.set_page_config(
     page_title="Portfolio Risk Dashboard",
@@ -271,45 +275,62 @@ if mode == "🔌 API":
 
     st.stop()
 
-# ── UNIVERSE (US large-caps + bond ETFs, priced in USD) ───────
-TICKERS = ["AAPL", "MSFT", "GOOGL", "NVDA", "META", "AMZN",
-           "JPM", "GS", "BAC", "MS", "XOM", "CVX", "COP",
-           "JNJ", "PFE", "UNH", "ABBV", "TSLA", "WMT", "BA",
-           "TLT", "IEF", "AGG", "LQD"]
-
-# Sector + asset-class tags drive the diversification analysis.
-SECTOR = {
-    "AAPL": "Technology", "MSFT": "Technology", "GOOGL": "Technology",
-    "NVDA": "Technology", "META": "Technology",
-    "AMZN": "Consumer", "TSLA": "Consumer", "WMT": "Consumer",
-    "JPM": "Financials", "GS": "Financials", "BAC": "Financials", "MS": "Financials",
-    "XOM": "Energy", "CVX": "Energy", "COP": "Energy",
-    "JNJ": "Healthcare", "PFE": "Healthcare", "UNH": "Healthcare", "ABBV": "Healthcare",
-    "BA": "Industrials",
-    "TLT": "Govt Bonds", "IEF": "Govt Bonds", "AGG": "Aggregate Bonds", "LQD": "Corp Bonds",
-}
-BONDS = {"TLT", "IEF", "AGG", "LQD"}
-ASSET_CLASS = {t: ("Bond" if t in BONDS else "Equity") for t in TICKERS}
-
-TRADING_DAYS = 252
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def load():
-    return load_prices(prefer_live=True)
-
-
-with st.spinner("Loading market data..."):
-    prices, lr, source = load()
-
-if prices is None:
-    st.error("Market data is temporarily unavailable (the data provider is rate-limiting "
-             "requests). Please refresh in a minute.")
+# ── DATA ──────────────────────────────────────────────────────
+try:
+    snap = data.load_snapshot()
+except data.SnapshotUnavailable as e:
+    st.error(f"Market data is unavailable right now ({e}). Please try again later.")
     st.stop()
 
-AVAILABLE = [c for c in prices.columns if c != "SPY"]
-DEFAULTS = [t for t in ["AAPL", "MSFT", "JPM", "XOM", "TLT"] if t in AVAILABLE][:5] \
-    or AVAILABLE[:5]
+
+class _Transient(Exception):
+    """A lookup that failed for a reason worth retrying; raised so the cache never keeps it."""
+
+    def __init__(self, result):
+        super().__init__(result.reason)
+        self.result = result
+
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def _live_cached(sym):
+    result = data.fetch_live(sym)
+    if result.status == "unavailable":
+        raise _Transient(result)
+    return result
+
+
+def _live(sym):
+    try:
+        return _live_cached(sym)
+    except _Transient as transient:
+        return transient.result
+
+
+def _last_price(sym):
+    if sym in snap.prices.columns:
+        s = snap.prices[sym].dropna()
+        return float(s.iloc[-1]) if len(s) else None
+    r = _live(sym)
+    return float(r.prices.iloc[-1]) if r.status == "ok" else None
+
+
+CONFIDENCE_LEVELS = {"90%": 0.90, "95%": 0.95, "99%": 0.99}
+EXAMPLE = {"AAPL": 20000.0, "MSFT": 20000.0, "JPM": 20000.0, "XOM": 20000.0, "TLT": 20000.0}
+
+if "holdings" not in st.session_state:
+    _shared = importer.decode_share(st.query_params.get("p", ""))
+    st.session_state.holdings = _shared.holdings or dict(EXAMPLE)
+    st.session_state.is_example = not _shared.holdings
+    st.session_state.editor_v = 0
+    st.session_state.import_notes = _shared.notes
+
+
+def _replace_holdings(parsed):
+    st.session_state.holdings = parsed.holdings
+    st.session_state.is_example = False
+    st.session_state.editor_v += 1          # a fresh key makes the table show the new rows
+    st.session_state.import_notes = parsed.notes
+
 
 # ── SIDEBAR: build the portfolio ──────────────────────────────
 with st.sidebar:
@@ -319,47 +340,92 @@ with st.sidebar:
     <div style='font-family:Syne;font-size:22px;font-weight:800;margin-bottom:20px;'>Build Your Portfolio</div>
     """, unsafe_allow_html=True)
 
-    selected = st.multiselect(
-        "Holdings — stocks & bonds (pick 2–12)", AVAILABLE, default=DEFAULTS,
-        help="Add the stocks and bond ETFs you actually hold.",
-    )
+    tab_paste, tab_csv, tab_search = st.tabs(["Paste", "Upload CSV", "Search"])
+    with tab_paste:
+        _txt = st.text_area("One holding per line: ticker, then dollars",
+                            placeholder="AAPL 10000\nVOO, $25,000\nmsft 8,500", key="paste_box")
+        if st.button("Load pasted holdings", key="load_paste"):
+            _replace_holdings(importer.parse_paste(_txt))
+    with tab_csv:
+        _up = st.file_uploader("Broker export (.csv)", type="csv", key="csv_up")
+        if _up is not None and st.button("Load CSV", key="load_csv"):
+            _replace_holdings(importer.parse_csv(
+                _up.getvalue().decode("utf-8-sig", errors="replace"), last_price=_last_price))
+    with tab_search:
+        _pick = st.selectbox("Find a ticker", sorted(snap.universe), index=None,
+                             format_func=lambda t: f"{t} — {snap.universe[t]['name']}",
+                             key="search_pick")
+        _other = st.text_input("…or type any US-listed ticker", key="search_other")
+        _amt = st.number_input("Amount ($)", min_value=0.0, value=10000.0, step=1000.0,
+                               key="search_amt")
+        if st.button("Add holding", key="add_holding"):
+            _sym = (_other or _pick or "").strip()
+            if _sym:
+                _base = {} if st.session_state.is_example else dict(st.session_state.holdings)
+                _replace_holdings(importer.from_rows(list(_base.items()) + [(_sym, _amt)]))
 
-    conf = st.select_slider(
-        "Confidence level", options=[0.90, 0.95, 0.99], value=0.95,
-        format_func=lambda x: f"{int(x*100)}%",
-    )
-
-    st.markdown("---")
-    st.caption("Enter how much money you hold in each (USD). The total is your portfolio value.")
-
-if len(selected) < 2:
-    st.warning("Pick at least 2 holdings in the sidebar to build a portfolio.")
-    st.stop()
-
-# ── HOLDINGS (real dollar amounts) ────────────────────────────
-with st.sidebar:
-    default_amt = float(round(100_000 / len(selected)))
-    amt_df = pd.DataFrame({
-        "Holding": selected,
-        "Type": [ASSET_CLASS[t] for t in selected],
-        "Amount $": [default_amt] * len(selected),
-    })
-    edited = st.data_editor(
-        amt_df, hide_index=True, width="stretch",
-        disabled=["Holding", "Type"],
+    if st.session_state.is_example:
+        st.caption("Showing an example portfolio — paste, upload or search to use your own.")
+    st.caption("Amounts are US dollars (market value), not share counts.")
+    _h = st.session_state.holdings
+    _edited = st.data_editor(
+        pd.DataFrame({"Ticker": pd.Series(list(_h), dtype="object"),
+                      "Amount $": pd.Series(list(_h.values()), dtype="float64")}),
+        num_rows="dynamic", hide_index=True, width="stretch",
+        key=f"amounts_{st.session_state.editor_v}",
         column_config={"Amount $": st.column_config.NumberColumn(
             min_value=0.0, step=1000.0, format="$%d")},
-        key="amounts",
     )
 
-amounts = edited["Amount $"].to_numpy(dtype=float)
-amounts = np.where(np.isfinite(amounts) & (amounts > 0), amounts, 0.0)
-if amounts.sum() <= 0:
-    amounts = np.ones(len(selected))
-port_val = float(amounts.sum())
-weights = amounts / amounts.sum()
+    conf = CONFIDENCE_LEVELS[st.select_slider(
+        "Confidence level", options=list(CONFIDENCE_LEVELS), value="95%")]
 
-# ── RISK ENGINE (all computed live) ───────────────────────────
+_parsed = importer.from_rows(list(zip(_edited["Ticker"], _edited["Amount $"])))
+_notes = st.session_state.import_notes + _parsed.notes
+if len(_parsed.holdings) > MAX_HOLDINGS:
+    st.error(f"This tool analyses up to {MAX_HOLDINGS} holdings; the table has "
+             f"{len(_parsed.holdings)}. Combine or remove some.")
+    st.stop()
+
+with st.spinner("Looking up tickers outside the dataset..."):
+    res = portfolio.resolve_holdings(_parsed.holdings, snap, live_fetch=_live,
+                                     max_live=LIVE_MAX_UI, budget_s=LIVE_BUDGET_UI_S)
+
+if res.rejected or _notes:
+    _items = "".join(f"<li><b>{html.escape(r.ticker)}</b> — {html.escape(r.reason)} · "
+                     f"${r.amount:,.0f} excluded</li>" for r in res.rejected)
+    _items += "".join(f"<li>{html.escape(n)}</li>" for n in _notes)
+    st.sidebar.markdown(f"""<div class='insight warn'><div class='insight-text'>
+        <strong>Not included</strong><ul>{_items}</ul></div></div>""", unsafe_allow_html=True)
+
+if snap.warning:
+    st.warning(snap.warning)
+if data.is_stale(snap):
+    st.warning(f"These prices are from {snap.as_of} — the daily refresh looks behind, so the "
+               f"numbers below are not current.")
+
+if len(res.tickers) < MIN_HOLDINGS:
+    st.warning("Add at least 2 holdings with an amount above $0 to build a portfolio.")
+    st.stop()
+
+selected = res.tickers
+amounts = np.array([res.holdings[t] for t in selected], dtype=float)
+port_val = float(amounts.sum())
+weights = amounts / port_val
+SECTOR = {t: res.meta[t]["sector"] for t in selected}
+ASSET_CLASS = {t: res.meta[t]["asset_class"] for t in selected}
+
+win = portfolio.portfolio_window(res.prices, selected, benchmark=snap.prices[BENCHMARK])
+if win.status == "too_short":
+    st.error(win.message)
+    st.stop()
+if win.status == "short":
+    st.warning(win.message)
+lr = win.returns
+prices = res.prices
+st.query_params["p"] = importer.encode_share(res.holdings)
+
+# ── RISK ENGINE ───────────────────────────────────────────────
 ret_sel = lr[selected].dropna()
 pr = metrics.portfolio_returns(lr, selected, weights)
 mu, std = pr.mean(), pr.std()
@@ -374,12 +440,12 @@ max_dd = metrics.max_drawdown(pr)
 # ── HERO ──────────────────────────────────────────────────────
 st.markdown(f"""
 <div class='hero'>
-    <div class='hero-eyebrow'>{source} · {len(ret_sel):,} trading days · end-of-day, refreshed hourly</div>
+    <div class='hero-eyebrow'>{html.escape(data.freshness_line(snap))} · {len(ret_sel):,} trading days analysed</div>
     <div class='hero-title'>Portfolio Risk Dashboard</div>
     <div class='hero-desc'>
         How much can this portfolio lose on a bad day — and how much of that risk does a
-        standard Gaussian model quietly miss? Every figure below is computed live from real
-        market data for your {len(selected)} selected holdings.
+        standard Gaussian model quietly miss? Every figure below is computed from end-of-day
+        market data for your {len(selected)} holdings.
     </div>
 </div>""", unsafe_allow_html=True)
 
@@ -389,8 +455,8 @@ st.markdown("""
     <div class='insight-icon'>👈</div>
     <div class='insight-text'>
         <strong>This dashboard is interactive — build your own portfolio.</strong>
-        All controls are in the panel on the left: choose stocks, set their weights, the portfolio
-        value, and the confidence level. Every number and chart below recomputes instantly.
+        All controls are in the panel on the left: paste, upload or search for holdings, set the
+        dollar amount in each, and choose the confidence level. Every number and chart below recomputes instantly.
         <strong>Don't see the panel?</strong> Click the <strong>›</strong> arrow at the very
         top-left of the page to open it.
     </div>
@@ -440,7 +506,7 @@ st.markdown(f"""
 </div>""", unsafe_allow_html=True)
 
 # ── SUPPORTING METRICS ────────────────────────────────────────
-st.markdown("<div class='sec'>Portfolio profile (full history)</div>", unsafe_allow_html=True)
+st.markdown("<div class='sec'>Portfolio profile (analysis window)</div>", unsafe_allow_html=True)
 s1, s2, s3 = st.columns(3)
 with s1:
     st.markdown(f"""<div class='big-stat'>
@@ -602,13 +668,6 @@ st.markdown("<div class='sec'>Stress test — how this exact portfolio would hav
             unsafe_allow_html=True)
 st.caption("Buy-and-hold your current holdings & weights through real historical crash windows. This is what risk managers actually do — past distributions break, so you pressure-test against the real thing.")
 
-# Real crisis windows present in the data (2018→). Each: label, start, end, one-line context.
-CRISES = [
-    ("2018 Q4 Selloff",  "2018-10-01", "2018-12-24", "Fed tightening + trade-war fears"),
-    ("COVID-19 Crash",   "2020-02-19", "2020-03-23", "Fastest-ever 30%+ market drop"),
-    ("2022 Bear Market", "2022-01-03", "2022-10-12", "Inflation shock + rate hikes"),
-]
-
 
 def stress(window_start, window_end):
     """Buy-and-hold the selected portfolio across a window. Returns (total_return,
@@ -624,7 +683,9 @@ def stress(window_start, window_end):
     return total, dd, worst, path
 
 
-results = [(label, ctx, stress(s, e)) for label, s, e, ctx in CRISES]
+_missed = {c["label"]: c["missing"] for c in portfolio.crisis_coverage(prices, selected)
+           if c["missing"]}
+results = [(label, ctx, stress(s, e)) for label, s, e, ctx in CRISES if label not in _missed]
 results = [(label, ctx, r) for label, ctx, r in results if r is not None]
 
 if results:
@@ -668,7 +729,11 @@ if results:
         </div>
     </div>""", unsafe_allow_html=True)
 else:
-    st.info("The selected data range doesn't fully cover the crisis windows — try the default tickers.")
+    st.info("None of the crisis windows is covered by every holding's price history.")
+
+if _missed:
+    st.caption("Not shown, because a holding was not yet trading: " + "; ".join(
+        f"{label} ({', '.join(tickers)})" for label, tickers in _missed.items()))
 
 # ── CORRELATION MATRIX ────────────────────────────────────────
 st.markdown("<div class='sec'>Correlation matrix — how your holdings move together</div>",
@@ -691,7 +756,7 @@ st.plotly_chart(hm, width="stretch")
 st.markdown("<div class='sec'>Model validation — did the risk numbers actually hold up?</div>",
             unsafe_allow_html=True)
 st.caption(f"A VaR estimate is only worth anything if it's been backtested. We roll a "
-           f"250-day window across all history, and each day ask: did the real loss breach "
+           f"250-day window across the analysis window, and each day ask: did the real loss breach "
            f"the VaR? A {int(conf*100)}% model should be breached about {int(round((1-conf)*100))}% "
            f"of the time — no more, and not in clusters. "
            f"Kupiec tests the rate; Christoffersen tests that breaches don't bunch up in crises.")
@@ -706,14 +771,19 @@ def _run_backtest(returns_values, conf, window):
 
 
 bt_rows, bt_hist = _run_backtest(pr, conf, 250)
+bt_graded = all(r["observations"] >= BACKTEST_MIN_OBS for r in bt_rows)
 
 rows_html = ""
 for row in bt_rows:
-    verdict = "PASS" if row["passed"] else "FAIL"
-    vcol = "#05d69e" if row["passed"] else "#ff3d5a"
+    if row["observations"] < BACKTEST_MIN_OBS:
+        verdict, vcol = "too few days", "#5a7088"
+    else:
+        verdict = "PASS" if row["passed"] else "FAIL"
+        vcol = "#05d69e" if row["passed"] else "#ff3d5a"
     rows_html += (
         f"<tr>"
         f"<td style='padding:10px 14px;color:#8a9bb8;text-transform:capitalize;'>{row['method']}</td>"
+        f"<td style='padding:10px 14px;text-align:right;font-family:DM Mono;color:#6a849e;'>{row['observations']}</td>"
         f"<td style='padding:10px 14px;text-align:right;font-family:DM Mono;'>{row['breaches']}</td>"
         f"<td style='padding:10px 14px;text-align:right;font-family:DM Mono;color:#6a849e;'>{row['expected']}</td>"
         f"<td style='padding:10px 14px;text-align:right;font-family:DM Mono;'>{row['kupiec_p']:.3f}</td>"
@@ -725,6 +795,7 @@ st.markdown(f"""
               border:1px solid var(--border);border-radius:10px;overflow:hidden;'>
     <tr style='background:#0c1220;'>
         <th style='padding:10px 14px;text-align:left;font-family:DM Mono;font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:#5a7088;'>Method</th>
+        <th style='padding:10px 14px;text-align:right;font-family:DM Mono;font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:#5a7088;'>Days tested</th>
         <th style='padding:10px 14px;text-align:right;font-family:DM Mono;font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:#5a7088;'>Breaches</th>
         <th style='padding:10px 14px;text-align:right;font-family:DM Mono;font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:#5a7088;'>Expected</th>
         <th style='padding:10px 14px;text-align:right;font-family:DM Mono;font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:#4d9fff;'>Kupiec p</th>
@@ -780,16 +851,29 @@ _closing = (
     if _both_cluster else
     "A model earns trust only by passing both — the right rate <em>and</em> independent breaches. "
     "That is the test a risk desk runs before it believes any VaR at all.")
-st.markdown(f"""
+if bt_graded:
+    st.markdown(f"""
 <div class='insight warn'>
     <div class='insight-icon'>🧪</div>
     <div class='insight-text'>
-        <strong>The honest scoreboard.</strong> Over the full history, historical VaR was breached
+        <strong>The honest scoreboard.</strong> Over the {_hist_row['observations']:,} tested days, historical VaR was breached
         <strong>{_hist_row['breaches']}</strong> times vs <strong>{_hist_row['expected']}</strong> expected,
         and Gaussian <strong>{_gauss_row['breaches']}</strong> times. Historical {_mv_rate(_hist_row)}
         {_mv_clust(_hist_row)}; Gaussian {_mv_rate(_gauss_row)} {_mv_clust(_gauss_row)}.
         Kupiec asks whether the breach <em>rate</em> matches the confidence level; Christoffersen asks
         whether breaches arrive <em>independently</em> or bunch together. {_closing}
+    </div>
+</div>""", unsafe_allow_html=True)
+else:
+    st.markdown(f"""
+<div class='insight warn'>
+    <div class='insight-icon'>🧪</div>
+    <div class='insight-text'>
+        <strong>Too few days to judge.</strong> The first 250 days of this window are used to
+        estimate VaR, which leaves only {_hist_row['observations']} days to test it against; at least
+        {BACKTEST_MIN_OBS} are needed before a pass or fail means anything. Historical VaR was breached
+        <strong>{_hist_row['breaches']}</strong> times vs <strong>{_hist_row['expected']}</strong> expected,
+        and Gaussian <strong>{_gauss_row['breaches']}</strong> times — shown for reference, not as a verdict.
     </div>
 </div>""", unsafe_allow_html=True)
 
@@ -840,6 +924,9 @@ st.caption("Every portfolio is a bundle of a few underlying bets. The Fama-Frenc
            "returns into three: the market, company size (small vs large), and value vs growth. "
            "Regressing this portfolio on them shows the tilts you actually hold — and how much of "
            "your risk is plain market beta vs bets you chose.")
+_factors = fac.load_factors()
+st.caption(f"Factor data through {_factors.index.max().date()} — Ken French "
+           f"publishes monthly, so it trails prices by about a month.")
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -851,66 +938,72 @@ def _run_factors(returns_values, index_values):
     return reg, attr
 
 
-_freg, _fattr = _run_factors(pr.to_numpy(), pr.index.values)
 
-_LABEL = {"Mkt-RF": "Market", "SMB": "Size (small−large)", "HML": "Value (value−growth)"}
-_rows = ""
-for name in fac.FACTOR_NAMES:
-    b = _freg["betas"][name]
-    tilt = ("—" if abs(b) < 0.05 else
-            ("tilts toward " + ("small-cap" if name == "SMB" and b > 0 else
-                                "large-cap" if name == "SMB" else
-                                "value" if name == "HML" and b > 0 else
-                                "growth" if name == "HML" else
-                                "more market risk" if b > 1 else "less market risk")))
-    _rows += (f"<tr>"
-              f"<td style='padding:10px 14px;color:#8a9bb8;'>{_LABEL[name]}</td>"
-              f"<td style='padding:10px 14px;text-align:right;font-family:DM Mono;font-weight:600;'>{b:+.2f}</td>"
-              f"<td style='padding:10px 14px;color:#6a849e;'>{tilt}</td>"
-              f"</tr>")
-st.markdown(f"""
-<table style='width:100%;border-collapse:collapse;background:var(--card);
-              border:1px solid var(--border);border-radius:10px;overflow:hidden;'>
-    <tr style='background:#0c1220;'>
-        <th style='padding:10px 14px;text-align:left;font-family:DM Mono;font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:#5a7088;'>Factor</th>
-        <th style='padding:10px 14px;text-align:right;font-family:DM Mono;font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:#4d9fff;'>Beta</th>
-        <th style='padding:10px 14px;text-align:left;font-family:DM Mono;font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:#5a7088;'>Reading</th>
-    </tr>
-    {_rows}
-</table>""", unsafe_allow_html=True)
+_factor_days = len(pr.index.intersection(_factors.index))
+if _factor_days < FACTOR_MIN_OBS:
+    st.info(f"Factor exposure needs at least {FACTOR_MIN_OBS} trading days that overlap the "
+            f"Fama-French data; this portfolio's window shares {_factor_days}, so no loadings are shown.")
+else:
+    _freg, _fattr = _run_factors(pr.to_numpy(), pr.index.values)
 
-# Variance decomposition bar
-_names = fac.FACTOR_NAMES + ["Idiosyncratic"]
-_vals = [_fattr[n] * 100 for n in _names]
-_colors = ["#4d9fff", "#ffb347", "#05d69e", "#5a7088"]
-ffig = go.Figure(go.Bar(x=[_LABEL.get(n, n) for n in _names], y=_vals,
-                        marker_color=_colors, text=[f"{v:.0f}%" for v in _vals],
-                        textposition="outside"))
-ffig.update_layout(plot_bgcolor="#0c1220", paper_bgcolor="#0c1220",
-                   font=dict(color="#dde4f0", family="DM Sans"),
-                   xaxis=dict(gridcolor="#1c2d44"),
-                   yaxis=dict(title="% of portfolio variance", gridcolor="#1c2d44"),
-                   height=340, margin=dict(l=20, r=20, t=20, b=20), showlegend=False)
-st.plotly_chart(ffig, width="stretch")
+    _LABEL = {"Mkt-RF": "Market", "SMB": "Size (small−large)", "HML": "Value (value−growth)"}
+    _rows = ""
+    for name in fac.FACTOR_NAMES:
+        b = _freg["betas"][name]
+        tilt = ("—" if abs(b) < 0.05 else
+                ("tilts toward " + ("small-cap" if name == "SMB" and b > 0 else
+                                    "large-cap" if name == "SMB" else
+                                    "value" if name == "HML" and b > 0 else
+                                    "growth" if name == "HML" else
+                                    "more market risk" if b > 1 else "less market risk")))
+        _rows += (f"<tr>"
+                  f"<td style='padding:10px 14px;color:#8a9bb8;'>{_LABEL[name]}</td>"
+                  f"<td style='padding:10px 14px;text-align:right;font-family:DM Mono;font-weight:600;'>{b:+.2f}</td>"
+                  f"<td style='padding:10px 14px;color:#6a849e;'>{tilt}</td>"
+                  f"</tr>")
+    st.markdown(f"""
+    <table style='width:100%;border-collapse:collapse;background:var(--card);
+                  border:1px solid var(--border);border-radius:10px;overflow:hidden;'>
+        <tr style='background:#0c1220;'>
+            <th style='padding:10px 14px;text-align:left;font-family:DM Mono;font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:#5a7088;'>Factor</th>
+            <th style='padding:10px 14px;text-align:right;font-family:DM Mono;font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:#4d9fff;'>Beta</th>
+            <th style='padding:10px 14px;text-align:left;font-family:DM Mono;font-size:10px;letter-spacing:0.15em;text-transform:uppercase;color:#5a7088;'>Reading</th>
+        </tr>
+        {_rows}
+    </table>""", unsafe_allow_html=True)
 
-_mkt_pct = _fattr["Mkt-RF"] * 100
-_smb, _hml = _freg["betas"]["SMB"], _freg["betas"]["HML"]
-_size_word = "small-cap" if _smb > 0.05 else "large-cap" if _smb < -0.05 else "size-neutral"
-_val_word = "value" if _hml > 0.05 else "growth" if _hml < -0.05 else "style-neutral"
-st.markdown(f"""
-<div class='insight'>
-    <div class='insight-icon'>🧬</div>
-    <div class='insight-text'>
-        <strong>Your portfolio in one sentence:</strong> about <strong>{_mkt_pct:.0f}%</strong> of its
-        risk is plain market beta (market β = {_freg['betas']['Mkt-RF']:.2f}), with a
-        <strong>{_size_word}</strong> tilt and a <strong>{_val_word}</strong> lean. Annualized alpha —
-        the return not explained by these three factors — is <strong>{_freg['alpha_annual']*100:+.1f}%</strong>,
-        and the model explains <strong>{_freg['r2']*100:.0f}%</strong> of the day-to-day moves (R²).
-        Alpha this small is the honest norm: most of what a diversified portfolio does is factor exposure,
-        not stock-picking magic. Factor betas here regress log excess returns on the simple Fama-French
-        factors — a standard daily-frequency approximation.
-    </div>
-</div>""", unsafe_allow_html=True)
+    # Variance decomposition bar
+    _names = fac.FACTOR_NAMES + ["Idiosyncratic"]
+    _vals = [_fattr[n] * 100 for n in _names]
+    _colors = ["#4d9fff", "#ffb347", "#05d69e", "#5a7088"]
+    ffig = go.Figure(go.Bar(x=[_LABEL.get(n, n) for n in _names], y=_vals,
+                            marker_color=_colors, text=[f"{v:.0f}%" for v in _vals],
+                            textposition="outside"))
+    ffig.update_layout(plot_bgcolor="#0c1220", paper_bgcolor="#0c1220",
+                       font=dict(color="#dde4f0", family="DM Sans"),
+                       xaxis=dict(gridcolor="#1c2d44"),
+                       yaxis=dict(title="% of portfolio variance", gridcolor="#1c2d44"),
+                       height=340, margin=dict(l=20, r=20, t=20, b=20), showlegend=False)
+    st.plotly_chart(ffig, width="stretch")
+
+    _mkt_pct = _fattr["Mkt-RF"] * 100
+    _smb, _hml = _freg["betas"]["SMB"], _freg["betas"]["HML"]
+    _size_word = "small-cap" if _smb > 0.05 else "large-cap" if _smb < -0.05 else "size-neutral"
+    _val_word = "value" if _hml > 0.05 else "growth" if _hml < -0.05 else "style-neutral"
+    st.markdown(f"""
+    <div class='insight'>
+        <div class='insight-icon'>🧬</div>
+        <div class='insight-text'>
+            <strong>Your portfolio in one sentence:</strong> about <strong>{_mkt_pct:.0f}%</strong> of its
+            risk is plain market beta (market β = {_freg['betas']['Mkt-RF']:.2f}), with a
+            <strong>{_size_word}</strong> tilt and a <strong>{_val_word}</strong> lean. Annualized alpha —
+            the return not explained by these three factors — is <strong>{_freg['alpha_annual']*100:+.1f}%</strong>,
+            and the model explains <strong>{_freg['r2']*100:.0f}%</strong> of the day-to-day moves (R²).
+            Alpha this small is the honest norm: most of what a diversified portfolio does is factor exposure,
+            not stock-picking magic. Factor betas here regress log excess returns on the simple Fama-French
+            factors — a standard daily-frequency approximation.
+        </div>
+    </div>""", unsafe_allow_html=True)
 
 # ── PORTFOLIO OPTIMIZER & DIVERSIFICATION ─────────────────────
 st.markdown("<div class='sec'>Optimizer — where you are vs. where the math says you should be</div>",
@@ -1048,10 +1141,8 @@ st.caption("Each future is built by resampling this portfolio's actual historica
            "(bootstrap), so it keeps the real fat tails a bell-curve model smooths away. "
            "Educational projection, not a forecast.")
 
-mc_h = st.select_slider(
-    "Time horizon", options=[126, 252, 504, 756], value=252,
-    format_func=lambda d: {126: "6 months", 252: "1 year",
-                           504: "2 years", 756: "3 years"}[d])
+HORIZON_DAYS = {"6 months": 126, "1 year": 252, "2 years": 504, "3 years": 756}
+mc_h = HORIZON_DAYS[st.select_slider("Time horizon", options=list(HORIZON_DAYS), value="1 year")]
 
 _rng = np.random.default_rng(42)
 N_SIMS = 10_000
@@ -1133,9 +1224,10 @@ st.markdown("""
     <div class='insight-text'>
         <strong>Know the limits — this is the front-office skill.</strong>
         (1) Historical VaR/CVaR assume the future resembles the past distribution — every model
-        that failed in 2008 made that assumption. (2) Correlations here are a full-history average;
-        in a real crisis they spike toward 1 and diversification collapses exactly when you need it.
-        (3) Data is end-of-day, refreshed hourly — not live intraday. The honest framing of this tool
-        is "a way to see how downside risk is measured," not a guarantee of tomorrow's loss.
+        that failed in 2008 made that assumption. (2) Correlations here are an average over the
+        analysis window; in a real crisis they spike toward 1 and diversification collapses exactly
+        when you need it. (3) Prices are end-of-day closes, refreshed once each US trading day — not
+        live intraday. The honest framing of this tool is "a way to see how downside risk is
+        measured," not a guarantee of tomorrow's loss.
     </div>
 </div>""", unsafe_allow_html=True)
