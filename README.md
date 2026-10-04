@@ -41,9 +41,9 @@ USD-listed tickers. The application provides:
   it: up to 20 per portfolio in the app, up to 5 per API request.
 - **Refresh:** a GitHub Action rebuilds the data bundle each weekday after the US close (full
   rebuild and Fama-French factor refresh on Sundays) and publishes it as the `data-latest`
-  release. Tickers with suspected bad prints or no recent closes are held back and named;
-  if more than 2% of tickers fail or are held back, nothing is published and the previous
-  day's data stays up.
+  release. Tickers with a suspected bad print in the latest 20 trading days, or no recent
+  closes, are held back and named; if more than 2% of tickers fail or are held back,
+  nothing is published and the previous day's data stays up.
 - **Fallback:** when the bundle cannot be downloaded, the last downloaded copy is used if one
   is cached, else a dated copy of the bundle in `data/fallback/`; the app says which.
 - **Freshness is shown:** the dashboard header states the data date, how many tickers are

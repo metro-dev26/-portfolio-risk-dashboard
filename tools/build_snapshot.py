@@ -32,6 +32,7 @@ SP500_MIN, SP500_MAX = 490, 510
 OVERLAP_DAYS = 10
 ADJ_TOL = 1e-4          # relative gap on overlapping closes that means history was re-scaled
 SPIKE, REVERSAL = 0.40, 0.5
+QUALITY_WINDOW_ROWS = 20   # bad prints are looked for in the latest rows only; older moves stand
 STALE_ROWS = 5
 MAX_BAD_FRAC = 0.02
 FALLBACK_GIVE_UP = 10   # consecutive failed urllib retries before the rest are skipped
@@ -184,12 +185,16 @@ def merge_incremental(stored, fresh, tol=ADJ_TOL):
     return pd.DataFrame(cols).sort_index(), repull
 
 
-def quality_gate(prices, spike=SPIKE, reversal=REVERSAL, stale_rows=STALE_ROWS):
+def quality_gate(prices, spike=SPIKE, reversal=REVERSAL, stale_rows=STALE_ROWS,
+                 window_rows=QUALITY_WINDOW_ROWS):
     """-> {ticker: reason} to hold back. A bad print jumps more than `spike` and the
     next close undoes at least `reversal` of the jump; a real crash doesn't bounce
-    back overnight. Stale = no close in the table's last `stale_rows` rows."""
+    back overnight. Only jumps in the table's last `window_rows` rows are judged, so a
+    real move that is already in the history (a meme-stock day) is not re-flagged by
+    every later build. Stale = no close in the table's last `stale_rows` rows."""
     held = {}
     recent = prices.index[-stale_rows:]
+    window = prices.index[-window_rows:]
     for t in prices.columns:
         s = prices[t].dropna()
         if s.empty:
@@ -202,7 +207,7 @@ def quality_gate(prices, spike=SPIKE, reversal=REVERSAL, stale_rows=STALE_ROWS):
         delta = s - prev
         jump = delta / prev
         undone = (s - s.shift(-1)) / delta.where(delta != 0)
-        bad = (jump.abs() > spike) & (undone >= reversal)
+        bad = (jump.abs() > spike) & (undone >= reversal) & (s.index >= window[0])
         if bad.any():
             held[t] = f"suspected bad print on {bad[bad].index[0].date()}"
     return held

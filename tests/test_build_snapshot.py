@@ -99,6 +99,32 @@ def test_bad_print_that_reverses_is_quarantined_but_real_crash_is_not():
     assert set(q) == {"BADTICK"} and "bad print" in q["BADTICK"]
 
 
+def _after_a_squeeze(spike_row, rows=320):
+    """A flat 46.80 close with HOOD's real 2021-08-04 sequence (70.39, then 50.97) from
+    `spike_row` on: a +50% day that the next close gives back 82% of, and then holds."""
+    values = [46.80] * rows
+    values[spike_row:] = [70.39] + [50.97] * (rows - spike_row - 1)
+    return pd.DataFrame({"HOOD": series(values, start="2025-01-02")})
+
+
+def test_a_real_spike_long_before_the_end_of_the_table_is_not_a_bad_print():
+    assert bs.quality_gate(_after_a_squeeze(100)) == {}
+
+
+def test_the_same_spike_in_the_latest_rows_is_a_bad_print():
+    prices = _after_a_squeeze(310)
+    assert bs.quality_gate(prices) == {"HOOD": f"suspected bad print on {prices.index[310].date()}"}
+
+
+def test_a_spike_is_judged_only_when_it_falls_in_the_last_twenty_rows():
+    assert bs.quality_gate(_after_a_squeeze(299)) == {}
+    assert set(bs.quality_gate(_after_a_squeeze(300))) == {"HOOD"}
+
+
+def test_a_spike_on_the_last_row_waits_for_the_next_close():
+    assert bs.quality_gate(_after_a_squeeze(319)) == {}
+
+
 def test_stale_ticker_is_quarantined():
     vals = [100.0] * 10
     prices = pd.DataFrame({"LIVE": series(vals), "DEAD": series(vals[:4] + [np.nan] * 6)})
@@ -467,14 +493,15 @@ def test_report_and_universe_are_plain_json(tmp_path, small_bounds):
             assert isinstance(json.load(f), dict)
 
 
-def _spiking(fetch, tickers):
-    """Wrap a fetch so each listed ticker has one wild close that the next day reverses."""
+def _spiking(fetch, tickers, row=-10):
+    """Wrap a fetch so each listed ticker has one wild close, `row` rows into its history,
+    that the next day reverses. The default is inside the rows the quality gate judges."""
     def spiking_fetch(requested, start):
         got, failed = fetch(requested, start)
         for t in tickers:
             if t in got:
                 got[t] = got[t].copy()
-                got[t].iloc[1000] *= 3
+                got[t].iloc[row] *= 3
         return got, failed
     return spiking_fetch
 
@@ -515,6 +542,13 @@ def test_a_bad_print_is_quarantined_and_left_out_of_the_published_prices(tmp_pat
     snap = data.read_bundle(str(tmp_path / "out"), "release")
     assert "T5" not in snap.prices.columns and "T4" in snap.prices.columns
     assert "bad print" in snap.quarantined["T5"]
+
+
+def test_a_wild_close_long_before_the_latest_rows_is_published_with_the_history(tmp_path, small_bounds):
+    html, fetch, factors = _fake_world()
+    report = _run_full(tmp_path, html, _spiking(fetch, ["T5"], row=1000), factors)
+    assert report["quarantined"] == {}
+    assert "T5" in data.read_bundle(str(tmp_path / "out"), "release").prices.columns
 
 
 def test_a_bad_print_on_the_benchmark_blocks_publishing(tmp_path, small_bounds):
