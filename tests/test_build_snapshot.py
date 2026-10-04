@@ -442,6 +442,40 @@ def _build_previous(tmp_path):
     return html, factors
 
 
+def _full_rebuild_over_previous(tmp_path, get_factors):
+    html, _ = _build_previous(tmp_path)
+    _, fetch, _ = _dated_world("2026-06-19")
+    return bs.run("full", str(tmp_path / "prev"), str(tmp_path / "out"),
+                  fetch=fetch, get_html=lambda: html, get_factors=get_factors)
+
+
+def test_failed_factor_download_reuses_the_previous_factors_and_says_so(tmp_path, small_bounds):
+    def down():
+        raise RuntimeError("Fama-French file has no header")
+
+    report = _full_rebuild_over_previous(tmp_path, down)
+    assert report["factors"] == "reused previous (RuntimeError: Fama-French file has no header)"
+    assert report["mode"] == "full" and report["as_of"] == "2026-06-19"
+    previous = data.read_bundle(str(tmp_path / "prev"), "previous").factors
+    pd.testing.assert_frame_equal(data.read_bundle(str(tmp_path / "out"), "release").factors, previous)
+
+
+def test_factor_download_without_a_complete_row_reuses_the_previous_factors(tmp_path, small_bounds):
+    gaps = _factors([[np.nan, 0.0, 0.0, 0.0], [0.0, np.nan, 0.0, 0.0]])
+    report = _full_rebuild_over_previous(tmp_path, lambda: gaps)
+    assert report["factors"].startswith("reused previous (") and "no row free of missing" in report["factors"]
+    assert report["factors_through"] == "2026-05-29"
+
+
+def test_report_says_where_the_factors_came_from(tmp_path, small_bounds):
+    html, previous_factors = _build_previous(tmp_path)
+    _, fetch, _ = _dated_world("2026-06-19")
+    report = bs.run("incremental", str(tmp_path / "prev"), str(tmp_path / "out"),
+                    fetch=fetch, get_html=lambda: html, get_factors=lambda: previous_factors)
+    assert report["factors"] == "stored"
+    assert _read_json(tmp_path / "prev" / "refresh_report.json")["factors"] == "downloaded"
+
+
 def test_incremental_run_extends_the_previous_bundle(tmp_path, small_bounds):
     html, factors = _build_previous(tmp_path)
     calls = []

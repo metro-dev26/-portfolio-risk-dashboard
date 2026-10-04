@@ -235,16 +235,41 @@ def fetch_factors():
     return df.set_index("Date").sort_index()
 
 
+class FactorsUnusable(ValueError):
+    """The factor table could not be downloaded or cannot be served."""
+
+
 def _complete_factors(factors):
     """The API cannot serve a factor table with gaps, so incomplete rows are dropped
-    and counted; a table with the wrong columns or no complete row blocks publishing."""
+    and counted; a table with the wrong columns or no complete row is unusable."""
     if list(factors.columns) != FACTOR_COLUMNS:
-        raise SystemExit(f"factor columns are {list(factors.columns)}, expected "
-                         f"{FACTOR_COLUMNS} — not publishing")
+        raise FactorsUnusable(f"factor columns are {list(factors.columns)}, expected {FACTOR_COLUMNS}")
     complete = factors.replace([np.inf, -np.inf], np.nan).dropna()
     if complete.empty:
-        raise SystemExit("factor table has no row free of missing values — not publishing")
+        raise FactorsUnusable("factor table has no row free of missing values")
     return complete, len(factors) - len(complete)
+
+
+def _download_factors(get_factors):
+    try:
+        raw = get_factors()
+    except Exception as e:  # the reason goes to the report or the exit message
+        raise FactorsUnusable(f"{type(e).__name__}: {e}") from e
+    return _complete_factors(raw)
+
+
+def _build_factors(mode, prev, get_factors):
+    """-> (complete factors, rows dropped, where the report says they came from). A full
+    build downloads them; if that yields nothing usable, the previous bundle's factors
+    stay in place rather than blocking the whole refresh."""
+    if mode != "full":
+        return (*_complete_factors(prev.factors), "stored")
+    try:
+        return (*_download_factors(get_factors), "downloaded")
+    except FactorsUnusable as e:
+        if prev is None:
+            raise
+        return (*_complete_factors(prev.factors), f"reused previous ({e})")
 
 
 def write_bundle(out_dir, prices, universe, factors, report):
@@ -349,14 +374,10 @@ def run(mode, prev_dir, out_dir, *, fetch=fetch_yf, get_html=None, get_factors=f
         _block(out_dir, report, f"{bad}/{len(tickers)} tickers failed or held back "
                                 f"({bad / len(tickers):.1%} > {MAX_BAD_FRAC:.0%})", failed, held)
 
-    if mode == "full":
-        try:
-            raw_factors = get_factors()
-        except Exception as e:  # the reason goes to the log; nothing is published without factors
-            raise SystemExit(f"factors unavailable ({type(e).__name__}: {e}) — not publishing") from e
-    else:
-        raw_factors = prev.factors
-    factors, factor_rows_dropped = _complete_factors(raw_factors)
+    try:
+        factors, factor_rows_dropped, report["factors"] = _build_factors(mode, prev, get_factors)
+    except FactorsUnusable as e:
+        raise SystemExit(f"factors unavailable ({e}) — not publishing") from e
     report["factors_through"] = str(factors.index.max().date())
     report["factor_rows_dropped"] = factor_rows_dropped
 

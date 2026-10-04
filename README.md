@@ -43,7 +43,8 @@ USD-listed tickers. The application provides:
   rebuild and Fama-French factor refresh on Sundays) and publishes it as the `data-latest`
   release. Tickers with a suspected bad print in the latest 20 trading days, or no recent
   closes, are held back and named; if more than 2% of tickers fail or are held back,
-  nothing is published and the previous day's data stays up.
+  nothing is published and the previous day's data stays up. When the factor download
+  fails, the previous factors are kept and the report says so.
 - **Fallback:** when the bundle cannot be downloaded, the last downloaded copy is used if one
   is cached, else a dated copy of the bundle in `data/fallback/`; the app says which.
 - **Freshness is shown:** the dashboard header states the data date, how many tickers are
