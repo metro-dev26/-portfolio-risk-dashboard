@@ -398,6 +398,8 @@ with st.sidebar:
         column_config={"Amount $": st.column_config.NumberColumn(
             min_value=0.0, step=1000.0, format="$%d")},
     )
+    st.caption("The page address now contains these holdings and amounts — share it only with "
+               "people who should see them.")
 
     conf = CONFIDENCE_LEVELS[st.select_slider(
         "Confidence level", options=list(CONFIDENCE_LEVELS), value="95%")]

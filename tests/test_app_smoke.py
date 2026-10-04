@@ -259,6 +259,12 @@ def test_add_holding_keeps_table_edits_and_deletions():
     assert at.session_state["holdings"] == {"AAPL": 12345.0, "MSFT": 5000.0, "NVDA": 10000.0}
 
 
+def test_the_holdings_table_warns_that_the_share_link_carries_the_holdings():
+    at = AppTest.from_file(APP, default_timeout=60).run()
+    assert ("The page address now contains these holdings and amounts — share it only with "
+            "people who should see them.") in _sidebar_text(at)
+
+
 def test_ninety_percent_confidence_reads_ten_percent_of_days():
     at = AppTest.from_file(APP, default_timeout=60).run()
     at.sidebar.select_slider[0].set_value("90%").run()
