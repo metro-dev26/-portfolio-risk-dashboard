@@ -332,7 +332,6 @@ def _csv_pricer():
 
 CONFIDENCE_LEVELS = {"90%": 0.90, "95%": 0.95, "99%": 0.99}
 CSV_MAX_BYTES = 2 * 1024 * 1024
-NO_REAL_SECTOR = {data.UNKNOWN_SECTOR, data.FUND_SECTOR}
 EXAMPLE = {"AAPL": 20000.0, "MSFT": 20000.0, "JPM": 20000.0, "XOM": 20000.0, "TLT": 20000.0}
 
 if "holdings" not in st.session_state:
@@ -1138,24 +1137,18 @@ else:
     st.dataframe(realloc, hide_index=True, width="stretch")
 
     # Diversification / concentration insight
-    sec_w = {}
-    eq_w = unplaced_w = 0.0
-    for i, t in enumerate(selected):
-        if ASSET_CLASS[t] == "Equity":
-            eq_w += weights[i]
-        if SECTOR[t] in NO_REAL_SECTOR or ASSET_CLASS[t] == data.OTHER_ASSET_CLASS:
-            unplaced_w += weights[i]
-        else:
-            sec_w[SECTOR[t]] = sec_w.get(SECTOR[t], 0.0) + weights[i]
-    if sec_w:
-        top_sec = max(sec_w, key=sec_w.get)
-        top_sec_pct = sec_w[top_sec] * 100
+    mix = portfolio.sector_mix(selected, weights, res.meta)
+    if mix.sectors:
+        top_sec = max(mix.sectors, key=mix.sectors.get)
+        top_sec_pct = mix.sectors[top_sec] * 100
         conc_txt = (f"you're <strong>{top_sec_pct:.0f}% concentrated in {html.escape(top_sec)}</strong> "
-                    f"and {eq_w*100:.0f}% in equities overall.")
+                    f"and {mix.equity*100:.0f}% in equities overall.")
     else:
         top_sec_pct, conc_txt = 0.0, ""
-    unplaced_txt = (f"{unplaced_w*100:.0f}% is in holdings whose sector isn't known here, so it is "
-                    f"left out of that check." if unplaced_w else "")
+    diversified_txt = (f"{mix.diversified*100:.0f}% is in broad-market or international funds, "
+                       f"which spread across many sectors." if mix.diversified else "")
+    unplaced_txt = (f"{mix.unplaced*100:.0f}% is in holdings whose sector isn't known here, so it is "
+                    f"left out of that check." if mix.unplaced else "")
 
     # Biggest suggested moves, in plain language
     deltas = (w_ms - weights)
@@ -1169,7 +1162,7 @@ else:
     <div class='insight {conc}'>
         <div class='insight-icon'>{"⚠️" if top_sec_pct >= 50 else "🧭"}</div>
         <div class='insight-text'>
-            <strong>Diversification check:</strong> {conc_txt} {unplaced_txt} To climb toward the best risk-adjusted mix, the
+            <strong>Diversification check:</strong> {conc_txt} {diversified_txt} {unplaced_txt} To climb toward the best risk-adjusted mix, the
             optimizer would <strong>add to {add_txt}</strong> and <strong>trim {trim_txt}</strong> —
             lifting your Sharpe from <strong>{cur_s:.2f}</strong> to <strong>{ms_s:.2f}</strong>
             ({"more return for the same risk" if ms_s > cur_s else "already near optimal"}).

@@ -27,10 +27,11 @@ BUNDLE_FILES = ("prices.csv.gz", "universe.json", "factors.csv", "refresh_report
 FALLBACK_RETRY_S = 300
 # Sector labels for holdings with no real sector: live_meta gives UNKNOWN_SECTOR to a stock
 # Yahoo has no sector for and FUND_SECTOR to an ETF, and tools/build_snapshot.py gives
-# UNKNOWN_SECTOR to an S&P 500 row whose GICS sector has no Yahoo name. The app leaves
-# both out of the sector-concentration check.
+# UNKNOWN_SECTOR to an S&P 500 row whose GICS sector has no Yahoo name. Both are left out
+# of the sector-concentration check.
 UNKNOWN_SECTOR = "Unknown"
 FUND_SECTOR = "Fund (holdings unknown)"
+NO_REAL_SECTOR = frozenset({UNKNOWN_SECTOR, FUND_SECTOR})
 OTHER_ASSET_CLASS = "Other"
 _UA = {"User-Agent": "Mozilla/5.0"}
 _CACHE_DIR = None

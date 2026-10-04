@@ -39,6 +39,32 @@ def test_empty_factor_data_is_refused_with_a_reason():
     assert "is empty" in e.value.problems[0]["reason"]
 
 
+def _with_sectors(**sectors):
+    snap = data.load_snapshot(use_memo=False)
+    universe = {t: {**meta, "sector": sectors.get(t, meta["sector"])} for t, meta in snap.universe.items()}
+    return dataclasses.replace(snap, universe=universe)
+
+
+def test_broad_market_funds_are_not_the_top_sector():
+    r = analyze_portfolio({"SPY": 60000, "TLT": 40000})
+    assert r["optimizer"]["top_sector"] == "Govt Bonds"
+    assert abs(r["optimizer"]["top_sector_pct"] - 0.40) < 1e-9
+
+
+def test_holdings_with_no_real_sector_are_not_the_top_sector():
+    snap = _with_sectors(AAPL=data.UNKNOWN_SECTOR, JPM=data.FUND_SECTOR)
+    r = analyze_portfolio({"AAPL": 40000, "JPM": 30000, "XOM": 30000}, snapshot=snap)
+    assert r["optimizer"]["top_sector"] == "Energy"
+    assert abs(r["optimizer"]["top_sector_pct"] - 0.30) < 1e-9
+
+
+def test_top_sector_says_so_when_no_holding_has_a_sector_to_name():
+    snap = _with_sectors(AAPL=data.UNKNOWN_SECTOR, MSFT="International")
+    r = analyze_portfolio({"AAPL": 50000, "MSFT": 30000, "SPY": 20000}, snapshot=snap)
+    assert r["optimizer"]["top_sector"] == "None identifiable"
+    assert r["optimizer"]["top_sector_pct"] == 0.0
+
+
 def test_analyze_values_are_finite_and_sane():
     r = analyze_portfolio(HOLDINGS)
     assert r["metrics"]["hist_var"] < 0                      # a loss quantile is negative

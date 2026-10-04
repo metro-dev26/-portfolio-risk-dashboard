@@ -308,6 +308,27 @@ def test_holdings_with_no_known_sector_are_left_out_of_the_sector_check_but_coun
     assert "50% is in holdings whose sector isn't known here" in box
 
 
+def test_a_broad_market_fund_beside_bonds_is_not_called_a_concentration():
+    at = _paste(AppTest.from_file(APP, default_timeout=60).run(), "SPY 60000\nTLT 40000")
+    assert not at.exception
+    box = _diversification_box(at)
+    assert "concentrated in Broad Market" not in box
+    assert "insight danger" not in box
+    assert "60% is in broad-market or international funds, which spread across many sectors" in box
+    assert "60% in equities overall" in box
+
+
+@pytest.mark.parametrize("label", ["Broad Market", "International"])
+def test_funds_that_span_sectors_are_left_out_of_the_sector_check_but_counted_as_equities(
+        monkeypatch, fresh_cache, label):
+    monkeypatch.setattr(data, "fetch_live", _fake_live(sector=label, type="etf"))
+    at = _paste(AppTest.from_file(APP, default_timeout=60).run(), "AAPL 5000\nZZA 5000")
+    box = _diversification_box(at)
+    assert "50% concentrated in Technology" in box and f"concentrated in {label}" not in box
+    assert "100% in equities overall" in box
+    assert "50% is in broad-market or international funds, which spread across many sectors" in box
+
+
 def test_sector_text_from_yahoo_is_escaped(monkeypatch):
     st.cache_data.clear()
     monkeypatch.setattr(data, "fetch_live", _fake_live(sector="<img src=x onerror=alert(1)>"))

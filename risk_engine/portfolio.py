@@ -8,8 +8,9 @@ import numpy as np
 import pandas as pd
 
 from risk_engine import data
-from risk_engine.config import (BENCHMARK, CRISES, LIVE_BUDGET_API_S, LIVE_MAX_API,
-                                WINDOW_MIN_DAYS, WINDOW_OK_DAYS)
+from risk_engine.config import (BENCHMARK, CRISES, DIVERSIFIED_FUND_SECTORS,
+                                LIVE_BUDGET_API_S, LIVE_MAX_API, WINDOW_MIN_DAYS,
+                                WINDOW_OK_DAYS)
 
 # A live series that stopped this many business days before the snapshot is
 # treated as delisted rather than analysed on an old, frozen price.
@@ -176,6 +177,33 @@ def portfolio_window(prices, tickers, benchmark=None):
     n = len(returns)
     status, message = _grade(n, limiting, aligned.index[0].date())
     return Window(returns, aligned.index[0], aligned.index[-1], first, n, status, limiting, message)
+
+
+@dataclass(frozen=True)
+class SectorMix:
+    sectors: dict       # real sector -> share of the portfolio
+    equity: float       # share in the Equity asset class, funds included
+    diversified: float  # share in funds that span sectors (broad-market, international)
+    unplaced: float     # share with no sector to judge by
+
+
+def sector_mix(tickers, weights, meta):
+    """Split a portfolio for the sector-concentration check. A fund that spans many sectors
+    and a holding with no known sector are not sectors a portfolio can be concentrated in,
+    so each is reported on its own instead of among the sectors."""
+    sectors, equity, diversified, unplaced = {}, 0.0, 0.0, 0.0
+    for t, w in zip(tickers, weights):
+        w = float(w)
+        sector, asset_class = meta[t]["sector"], meta[t]["asset_class"]
+        if asset_class == "Equity":
+            equity += w
+        if sector in data.NO_REAL_SECTOR or asset_class == data.OTHER_ASSET_CLASS:
+            unplaced += w
+        elif sector in DIVERSIFIED_FUND_SECTORS:
+            diversified += w
+        else:
+            sectors[sector] = sectors.get(sector, 0.0) + w
+    return SectorMix(sectors, equity, diversified, unplaced)
 
 
 def crisis_coverage(prices, tickers, crises=CRISES):

@@ -56,6 +56,10 @@ CURATED_ETFS = {
     "GLD": ("SPDR Gold Shares", "Gold", "Commodity"),
 }
 
+# Funds that spread across many sectors: they count as equity, but a portfolio cannot be
+# concentrated in them as a sector.
+DIVERSIFIED_FUND_SECTORS = frozenset({"Broad Market", "International"})
+
 # Real crash windows inside the data (2018 onward): label, start, end, context.
 # Tariff-shock dates are SPY's close-to-close peak and trough (-18.8%).
 CRISES = [

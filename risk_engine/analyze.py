@@ -19,6 +19,7 @@ class PortfolioError(ValueError):
 
 
 FACTORS_PROBLEM = "(factors)"
+NO_IDENTIFIABLE_SECTOR = "None identifiable"
 
 
 def _factor_gap_reason(factors, shared, window_days):
@@ -78,18 +79,19 @@ def analyze_portfolio(holdings, *, confidence=0.95, include_backtest=True,
     w_mv = optimize.min_variance_weights(cov)
     _, _, cur_sharpe = optimize.perf(weights, mu, cov)
     _, _, ms_sharpe = optimize.perf(w_ms, mu, cov)
-    sector_pct = {}
-    for t, w in zip(tickers, weights):
-        s = res.meta[t]["sector"]
-        sector_pct[s] = sector_pct.get(s, 0.0) + float(w)
-    top_sector = max(sector_pct, key=sector_pct.get)
+    sector_pct = portfolio.sector_mix(tickers, weights, res.meta).sectors
+    if sector_pct:
+        top_sector = max(sector_pct, key=sector_pct.get)
+        top_sector_pct = sector_pct[top_sector]
+    else:
+        top_sector, top_sector_pct = NO_IDENTIFIABLE_SECTOR, 0.0
     result["optimizer"] = {
         "current_sharpe": float(cur_sharpe),
         "max_sharpe_value": float(ms_sharpe),
         "max_sharpe_weights": {t: float(w) for t, w in zip(tickers, w_ms)},
         "min_variance_weights": {t: float(w) for t, w in zip(tickers, w_mv)},
         "top_sector": top_sector,
-        "top_sector_pct": float(sector_pct[top_sector]),
+        "top_sector_pct": float(top_sector_pct),
     }
 
     result["data"] = {

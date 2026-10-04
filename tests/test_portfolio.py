@@ -54,6 +54,24 @@ def test_live_cap_and_time_budget():
     assert r2.rejected[0].ticker == "ZZ2" and "time budget" in r2.rejected[0].reason
 
 
+def test_sector_mix_leaves_funds_that_span_sectors_and_unplaced_holdings_out_of_the_sectors():
+    meta = {
+        "AAPL": {"sector": "Technology", "asset_class": "Equity"},
+        "TLT": {"sector": "Govt Bonds", "asset_class": "Bond"},
+        "SPY": {"sector": "Broad Market", "asset_class": "Equity"},
+        "VXUS": {"sector": "International", "asset_class": "Equity"},
+        "ZZA": {"sector": data.UNKNOWN_SECTOR, "asset_class": "Equity"},
+        "ZZB": {"sector": data.FUND_SECTOR, "asset_class": "Equity"},
+        "ZZC": {"sector": "Technology", "asset_class": data.OTHER_ASSET_CLASS},
+    }
+    tickers = list(meta)
+    mix = portfolio.sector_mix(tickers, [0.1, 0.2, 0.3, 0.1, 0.1, 0.1, 0.1], meta)
+    assert mix.sectors == pytest.approx({"Technology": 0.1, "Govt Bonds": 0.2})
+    assert mix.diversified == pytest.approx(0.4)
+    assert mix.unplaced == pytest.approx(0.3)
+    assert mix.equity == pytest.approx(0.7)
+
+
 def test_quarantined_ticker_is_rejected_not_looked_up():
     s = snap()
     held = data.Snapshot(s.prices, s.universe, s.factors,
