@@ -1141,12 +1141,12 @@ else:
     sec_w = {}
     eq_w = unplaced_w = 0.0
     for i, t in enumerate(selected):
-        if SECTOR[t] in NO_REAL_SECTOR or ASSET_CLASS[t] == "Other":
-            unplaced_w += weights[i]
-            continue
-        sec_w[SECTOR[t]] = sec_w.get(SECTOR[t], 0.0) + weights[i]
         if ASSET_CLASS[t] == "Equity":
             eq_w += weights[i]
+        if SECTOR[t] in NO_REAL_SECTOR or ASSET_CLASS[t] == data.OTHER_ASSET_CLASS:
+            unplaced_w += weights[i]
+        else:
+            sec_w[SECTOR[t]] = sec_w.get(SECTOR[t], 0.0) + weights[i]
     if sec_w:
         top_sec = max(sec_w, key=sec_w.get)
         top_sec_pct = sec_w[top_sec] * 100

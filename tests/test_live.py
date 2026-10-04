@@ -223,3 +223,17 @@ def test_invalid_start_date_format():
         raise AssertionError("network called with invalid start")
     r = data.fetch_live("PLTR", start="garbage", get_json=explode)
     assert r.status == "unavailable" and "invalid start date" in r.reason
+
+
+@pytest.mark.parametrize("quote,sector,asset_class", [
+    ({"quoteType": "EQUITY"}, data.UNKNOWN_SECTOR, "Equity"),
+    ({"quoteType": "EQUITY", "sector": ""}, data.UNKNOWN_SECTOR, "Equity"),
+    ({"quoteType": "EQUITY", "sector": "   "}, data.UNKNOWN_SECTOR, "Equity"),
+    ({"quoteType": "EQUITY", "sector": " Technology "}, "Technology", "Equity"),
+    ({"quoteType": "ETF"}, data.FUND_SECTOR, "Fund"),
+    ({"quoteType": "INDEX", "typeDisp": "Index"}, "Index", data.OTHER_ASSET_CLASS),
+    ({"quoteType": "INDEX", "typeDisp": " "}, "Other", data.OTHER_ASSET_CLASS),
+])
+def test_live_meta_labels_a_missing_or_blank_sector(quote, sector, asset_class):
+    meta = data.live_meta({**quote, "symbol": "X"})
+    assert (meta["sector"], meta["asset_class"]) == (sector, asset_class)

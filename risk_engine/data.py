@@ -25,6 +25,11 @@ _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FALLBACK_DIR = os.path.join(_REPO, "data", "fallback")
 BUNDLE_FILES = ("prices.csv.gz", "universe.json", "factors.csv", "refresh_report.json")
 FALLBACK_RETRY_S = 300
+# Labels live_meta gives a holding Yahoo cannot place in a sector; the app leaves
+# them out of the sector-concentration check.
+UNKNOWN_SECTOR = "Unknown"
+FUND_SECTOR = "Fund (holdings unknown)"
+OTHER_ASSET_CLASS = "Other"
 _UA = {"User-Agent": "Mozilla/5.0"}
 _CACHE_DIR = None
 
@@ -277,8 +282,9 @@ def _get_json(url, timeout):
         return json.loads(r.read())
 
 
-UNKNOWN_SECTOR = "Unknown"
-FUND_SECTOR = "Fund (holdings unknown)"
+def _label(value):
+    """A stripped, non-empty string from a quote field, else None."""
+    return (value.strip() or None) if isinstance(value, str) else None
 
 
 def live_meta(quote):
@@ -286,15 +292,13 @@ def live_meta(quote):
     kind = {"EQUITY": "stock", "ETF": "etf"}.get(quote_type) if isinstance(quote_type, str) else None
     kind = kind or "other"
     if kind == "stock":
-        sector_val = quote.get("sector")
-        sector = sector_val if isinstance(sector_val, str) else UNKNOWN_SECTOR
+        sector = _label(quote.get("sector")) or UNKNOWN_SECTOR
         asset_class = "Equity"
     elif kind == "etf":
         sector, asset_class = FUND_SECTOR, "Fund"
     else:
-        type_disp = quote.get("typeDisp")
-        sector = type_disp if isinstance(type_disp, str) else "Other"
-        asset_class = "Other"
+        sector = _label(quote.get("typeDisp")) or "Other"
+        asset_class = OTHER_ASSET_CLASS
     name = quote.get("longname") or quote.get("shortname") or quote.get("symbol", "Unknown")
     if not isinstance(name, str):
         name = "Unknown"

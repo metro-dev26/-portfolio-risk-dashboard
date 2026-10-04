@@ -111,14 +111,17 @@ def _paste(at, text):
     return at
 
 
-def _fake_live(sessions=None, **meta):
-    """Stand-in for data.fetch_live: a USD ticker with `sessions` of history (all of it by default)."""
+def _fake_live(sessions=None, listed=None, **meta):
+    """Stand-in for data.fetch_live: a USD ticker with `sessions` of history (all of it by
+    default); `listed` maps a symbol to the date its history starts."""
     profile = {"name": "Fake Co", "sector": "Technology", "type": "stock",
                "asset_class": "Equity", "in_sp500": False, "curated": False, **meta}
 
     def fetch(sym):
         index = data.load_snapshot().prices.index
         index = index if sessions is None else index[-sessions:]
+        if listed and sym in listed:
+            index = index[index >= listed[sym]]
         steps = np.random.default_rng(sum(map(ord, sym))).normal(0.0004, 0.01, len(index))
         walk = pd.Series(100 * np.exp(np.cumsum(steps)), index=index, name=sym)
         return data.LiveResult(sym, "ok", "", walk, profile)
@@ -136,16 +139,16 @@ def fresh_cache():
 class _Upload:
     """The part of st.file_uploader's return value the app reads."""
 
-    def __init__(self, text):
+    def __init__(self, text, size=None):
         self._bytes = text.encode()
-        self.size = len(self._bytes)
+        self.size = len(self._bytes) if size is None else size
 
     def getvalue(self):
         return self._bytes
 
 
-def _with_upload(monkeypatch, text):
-    monkeypatch.setattr(st, "file_uploader", lambda *args, **kwargs: _Upload(text))
+def _with_upload(monkeypatch, text, size=None):
+    monkeypatch.setattr(st, "file_uploader", lambda *args, **kwargs: _Upload(text, size))
 
 
 def test_short_history_shows_backtest_numbers_without_a_verdict(monkeypatch):
@@ -202,14 +205,21 @@ def test_stress_section_includes_tariff_shock():
     assert "2025 Tariff Shock" in _body(at)
 
 
+def _missed_by_crisis(at):
+    (note,) = [str(c.value) for c in at.caption if "not yet trading" in str(c.value)]
+    entries = (entry.split(" (", 1) for entry in note.split(": ", 1)[1].split("; "))
+    return {label: set(tickers.rstrip(")").split(", ")) for label, tickers in entries}
+
+
 def test_crisis_note_pairs_each_crisis_with_the_holdings_that_missed_it(monkeypatch, fresh_cache):
-    monkeypatch.setattr(data, "fetch_live", _fake_live(1000))
-    at = _paste(AppTest.from_file(APP, default_timeout=60).run(), "AAPL 10000\nNEWCO 5000")
-    notes = [str(c.value) for c in at.caption if "not yet trading" in str(c.value)]
-    assert len(notes) == 1
-    for label in ("2018 Q4 Selloff", "COVID-19 Crash", "2022 Bear Market"):
-        assert f"{label} (NEWCO)" in notes[0]
-    assert "2025 Tariff Shock" not in notes[0] and "AAPL" not in notes[0]
+    monkeypatch.setattr(data, "fetch_live", _fake_live(
+        listed={"LATEA": "2021-06-01", "LATEB": "2022-06-24"}))
+    at = _paste(AppTest.from_file(APP, default_timeout=60).run(), "AAPL 10000\nLATEA 5000\nLATEB 5000")
+    assert _missed_by_crisis(at) == {
+        "2018 Q4 Selloff": {"LATEA", "LATEB"},
+        "COVID-19 Crash": {"LATEA", "LATEB"},
+        "2022 Bear Market": {"LATEB"},
+    }
     assert "2025 Tariff Shock" in _body(at)
 
 
@@ -259,8 +269,12 @@ def test_ninety_percent_confidence_reads_ten_percent_of_days():
 SECTORLESS_QUOTES = {
     "fund": {"quoteType": "ETF"},
     "stock with no sector": {"quoteType": "EQUITY"},
+    "stock with a blank sector": {"quoteType": "EQUITY", "sector": "  "},
     "index": {"quoteType": "INDEX", "typeDisp": "Index"},
 }
+# Equities' share of a portfolio split evenly between AAPL and one holding of each kind.
+EQUITY_PCT_BESIDE_AAPL = {"fund": 50, "stock with no sector": 100,
+                          "stock with a blank sector": 100, "index": 50}
 
 
 def _sectorless_live(kind, symbol="X"):
@@ -290,6 +304,7 @@ def test_holdings_with_no_known_sector_are_left_out_of_the_sector_check_but_coun
     at = _paste(AppTest.from_file(APP, default_timeout=60).run(), "AAPL 5000\nZZA 5000")
     box = _diversification_box(at)
     assert "50% concentrated in Technology" in box
+    assert f"{EQUITY_PCT_BESIDE_AAPL[kind]}% in equities overall" in box
     assert "50% is in holdings whose sector isn't known here" in box
 
 
@@ -382,6 +397,13 @@ def test_dark_theme_is_pinned_so_the_sidebar_is_readable_in_light_mode():
     assert tomllib.loads(config_toml.read_text())["theme"]["base"] == "dark"
 
 
-def test_upload_limit_matches_the_two_megabyte_csv_cap():
+@pytest.mark.parametrize("bytes_over_server_limit,refused", [(0, False), (1, True)])
+def test_app_csv_cap_sits_exactly_at_the_servers_upload_limit(
+        monkeypatch, bytes_over_server_limit, refused):
     config_toml = Path(__file__).resolve().parent.parent / ".streamlit" / "config.toml"
-    assert tomllib.loads(config_toml.read_text())["server"]["maxUploadSize"] == 2
+    limit = tomllib.loads(config_toml.read_text())["server"]["maxUploadSize"] * 1024 * 1024
+    _with_upload(monkeypatch, "Symbol,Value\nAAPL,1\n", size=limit + bytes_over_server_limit)
+    at = AppTest.from_file(APP, default_timeout=60).run()
+    assert not at.exception
+    assert bool(at.sidebar.error) is refused
+    assert bool([b for b in at.button if b.key == "load_csv"]) is not refused
