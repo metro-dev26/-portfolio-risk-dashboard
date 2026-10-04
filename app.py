@@ -962,27 +962,17 @@ st.caption("Every portfolio is a bundle of a few underlying bets. The Fama-Frenc
            "returns into three: the market, company size (small vs large), and value vs growth. "
            "Regressing this portfolio on them shows the tilts you actually hold — and how much of "
            "your risk is plain market beta vs bets you chose.")
-_factors = fac.load_factors()
+_factors = snap.factors
 st.caption(f"Factor data through {_factors.index.max().date()} — Ken French "
            f"publishes monthly, so it trails prices by about a month.")
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def _run_factors(returns_values, index_values):
-    s = pd.Series(returns_values, index=pd.to_datetime(index_values))
-    f = fac.load_factors()
-    reg = fac.factor_regression(s, f)
-    attr = fac.variance_attribution(reg)
-    return reg, attr
-
-
 
 _factor_days = len(pr.index.intersection(_factors.index))
 if _factor_days < FACTOR_MIN_OBS:
     st.info(f"Factor exposure needs at least {FACTOR_MIN_OBS} trading days that overlap the "
             f"Fama-French data; this portfolio's window shares {_factor_days}, so no loadings are shown.")
 else:
-    _freg, _fattr = _run_factors(pr.to_numpy(), pr.index.values)
+    _freg = fac.factor_regression(pr, _factors)
+    _fattr = fac.variance_attribution(_freg)
 
     _LABEL = {"Mkt-RF": "Market", "SMB": "Size (small−large)", "HML": "Value (value−growth)"}
     _rows = ""

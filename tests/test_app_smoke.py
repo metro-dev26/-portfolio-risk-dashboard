@@ -11,6 +11,7 @@ import streamlit as st
 from streamlit.testing.v1 import AppTest
 
 from risk_engine import config, data, importer
+from risk_engine import factors as fac
 from risk_engine.config import CRISES
 
 # Resolve app.py against the repo root, not the caller's cwd or the test-file
@@ -284,6 +285,15 @@ def test_add_holding_to_the_untouched_example_starts_a_new_portfolio():
     at.text_input(key="search_other").input("NVDA")
     at.button(key="add_holding").click().run()
     assert at.session_state["holdings"] == {"NVDA": 10000.0}
+
+
+def test_factor_section_reads_the_loaded_snapshot_not_a_second_load(monkeypatch):
+    st.cache_data.clear()
+    loaded = data.load_snapshot().factors
+    monkeypatch.setattr(fac, "load_factors", lambda: loaded.iloc[:100])
+    at = AppTest.from_file(APP, default_timeout=60).run()
+    assert not at.exception
+    assert any(f"Factor data through {loaded.index.max().date()}" in str(c.value) for c in at.caption)
 
 
 def test_ninety_percent_confidence_reads_ten_percent_of_days():
