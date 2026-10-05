@@ -210,7 +210,7 @@ def test_fetch_yf_survives_an_empty_download_and_stops_retrying_during_an_outage
 
 
 def test_fetch_yf_with_no_tickers_does_not_call_yfinance(monkeypatch):
-    monkeypatch.delitem(sys.modules, "yfinance", raising=False)
+    monkeypatch.setitem(sys.modules, "yfinance", None)    # any import of it now raises
     assert bs.fetch_yf([], "2026-01-01") == ({}, {})
 
 

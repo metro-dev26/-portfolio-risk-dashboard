@@ -132,10 +132,10 @@ def fetch_yf(tickers, start):
     it misses gets one retry over plain urllib, abandoned after FALLBACK_GIVE_UP
     consecutive failures so an outage can't stall the build ticker by ticker.
     -> (series by ticker, reason by ticker)."""
-    import yfinance as yf
     got, failed = {}, {}
     if not tickers:
         return got, failed
+    import yfinance as yf
     try:
         frame = yf.download(tickers, start=start, auto_adjust=True, progress=False, threads=True)
     except Exception as e:  # nothing can be built without prices; the cause goes to the log
