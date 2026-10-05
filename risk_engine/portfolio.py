@@ -181,17 +181,18 @@ def portfolio_window(prices, tickers, benchmark=None):
 
 @dataclass(frozen=True)
 class SectorMix:
-    sectors: dict       # real sector -> share of the portfolio
+    sectors: dict       # stock sector -> share of the portfolio
     equity: float       # share in the Equity asset class, funds included
     diversified: float  # share in funds that span sectors (broad-market, international)
     unplaced: float     # share with no sector to judge by
+    non_equity: dict    # asset class (Bond, Commodity) -> share of the portfolio
 
 
 def sector_mix(tickers, weights, meta):
-    """Split a portfolio for the sector-concentration check. A fund that spans many sectors
-    and a holding with no known sector are not sectors a portfolio can be concentrated in,
-    so each is reported on its own instead of among the sectors."""
-    sectors, equity, diversified, unplaced = {}, 0.0, 0.0, 0.0
+    """Split a portfolio for the sector-concentration check. Only stocks are judged by
+    sector: bonds and gold are reported by asset class, and a fund that spans many sectors
+    or a holding with no known sector is reported on its own."""
+    sectors, equity, diversified, unplaced, non_equity = {}, 0.0, 0.0, 0.0, {}
     for t, w in zip(tickers, weights):
         w = float(w)
         sector, asset_class = meta[t]["sector"], meta[t]["asset_class"]
@@ -199,11 +200,13 @@ def sector_mix(tickers, weights, meta):
             equity += w
         if sector in data.NO_REAL_SECTOR or asset_class == data.OTHER_ASSET_CLASS:
             unplaced += w
+        elif asset_class != "Equity":
+            non_equity[asset_class] = non_equity.get(asset_class, 0.0) + w
         elif sector in DIVERSIFIED_FUND_SECTORS:
             diversified += w
         else:
             sectors[sector] = sectors.get(sector, 0.0) + w
-    return SectorMix(sectors, equity, diversified, unplaced)
+    return SectorMix(sectors, equity, diversified, unplaced, non_equity)
 
 
 def crisis_coverage(prices, tickers, crises=CRISES):

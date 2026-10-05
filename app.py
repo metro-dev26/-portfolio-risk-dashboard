@@ -332,6 +332,7 @@ def _csv_pricer():
 
 CONFIDENCE_LEVELS = {"90%": 0.90, "95%": 0.95, "99%": 0.99}
 CSV_MAX_BYTES = 2 * 1024 * 1024
+NON_EQUITY_LABEL = {"Bond": "bonds", "Commodity": "commodities"}
 EXAMPLE = {"AAPL": 20000.0, "MSFT": 20000.0, "JPM": 20000.0, "XOM": 20000.0, "TLT": 20000.0}
 
 if "holdings" not in st.session_state:
@@ -1139,11 +1140,16 @@ else:
         conc_txt = (f"you're <strong>{top_sec_pct:.0f}% concentrated in {html.escape(top_sec)}</strong> "
                     f"and {mix.equity*100:.0f}% in equities overall.")
     else:
-        top_sec_pct, conc_txt = 0.0, ""
+        top_sec_pct = 0.0
+        conc_txt = f"you're {mix.equity*100:.0f}% in equities overall." if mix.equity else ""
     diversified_txt = (f"{mix.diversified*100:.0f}% is in broad-market or international funds, "
                        f"which spread across many sectors." if mix.diversified else "")
     unplaced_txt = (f"{mix.unplaced*100:.0f}% is in holdings whose sector isn't known here, so it is "
                     f"left out of that check." if mix.unplaced else "")
+    non_equity_parts = [f"{share*100:.0f}% is in {NON_EQUITY_LABEL.get(cls, cls.lower())}"
+                        for cls, share in mix.non_equity.items()]
+    non_equity_txt = (f"{' and '.join(non_equity_parts)}, which are not a stock sector."
+                      if non_equity_parts else "")
 
     # Biggest suggested moves, in plain language
     deltas = (w_ms - weights)
@@ -1157,7 +1163,7 @@ else:
     <div class='insight {conc}'>
         <div class='insight-icon'>{"⚠️" if top_sec_pct >= 50 else "🧭"}</div>
         <div class='insight-text'>
-            <strong>Diversification check:</strong> {conc_txt} {diversified_txt} {unplaced_txt} To climb toward the best risk-adjusted mix, the
+            <strong>Diversification check:</strong> {conc_txt} {non_equity_txt} {diversified_txt} {unplaced_txt} To climb toward the best risk-adjusted mix, the
             optimizer would <strong>add to {add_txt}</strong> and <strong>trim {trim_txt}</strong> —
             lifting your Sharpe from <strong>{cur_s:.2f}</strong> to <strong>{ms_s:.2f}</strong>
             ({"more return for the same risk" if ms_s > cur_s else "already near optimal"}).

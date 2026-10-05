@@ -47,8 +47,15 @@ def _with_sectors(**sectors):
 
 def test_broad_market_funds_are_not_the_top_sector():
     r = analyze_portfolio({"SPY": 60000, "TLT": 40000})
-    assert r["optimizer"]["top_sector"] == "Govt Bonds"
-    assert abs(r["optimizer"]["top_sector_pct"] - 0.40) < 1e-9
+    assert r["optimizer"]["top_sector"] == "None identifiable"
+    assert r["optimizer"]["top_sector_pct"] == 0.0
+
+
+def test_bonds_are_reported_by_asset_class_not_as_the_top_sector():
+    r = analyze_portfolio({"AAPL": 30000, "JPM": 20000, "TLT": 40000, "IEF": 10000})
+    assert r["optimizer"]["top_sector"] == "Technology"
+    assert abs(r["optimizer"]["top_sector_pct"] - 0.30) < 1e-9
+    assert r["optimizer"]["non_equity_pct"] == pytest.approx({"Bond": 0.50})
 
 
 def test_holdings_with_no_real_sector_are_not_the_top_sector():

@@ -72,6 +72,7 @@ class Optimizer(BaseModel):
     min_variance_weights: dict[str, float]
     top_sector: str
     top_sector_pct: float
+    non_equity_pct: dict[str, float]    # bonds and gold, kept out of the sector check
 
 
 class BacktestRow(BaseModel):

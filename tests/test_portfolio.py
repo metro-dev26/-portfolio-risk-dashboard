@@ -66,10 +66,24 @@ def test_sector_mix_leaves_funds_that_span_sectors_and_unplaced_holdings_out_of_
     }
     tickers = list(meta)
     mix = portfolio.sector_mix(tickers, [0.1, 0.2, 0.3, 0.1, 0.1, 0.1, 0.1], meta)
-    assert mix.sectors == pytest.approx({"Technology": 0.1, "Govt Bonds": 0.2})
+    assert mix.sectors == pytest.approx({"Technology": 0.1})
+    assert mix.non_equity == pytest.approx({"Bond": 0.2})
     assert mix.diversified == pytest.approx(0.4)
     assert mix.unplaced == pytest.approx(0.3)
     assert mix.equity == pytest.approx(0.7)
+
+
+def test_sector_mix_judges_only_stocks_by_sector_and_reports_bonds_and_gold_by_asset_class():
+    meta = {
+        "AAPL": {"sector": "Technology", "asset_class": "Equity"},
+        "TLT": {"sector": "Govt Bonds", "asset_class": "Bond"},
+        "LQD": {"sector": "Corp Bonds", "asset_class": "Bond"},
+        "GLD": {"sector": "Gold", "asset_class": "Commodity"},
+    }
+    mix = portfolio.sector_mix(list(meta), [0.4, 0.3, 0.2, 0.1], meta)
+    assert mix.sectors == pytest.approx({"Technology": 0.4})
+    assert mix.non_equity == pytest.approx({"Bond": 0.5, "Commodity": 0.1})
+    assert mix.equity == pytest.approx(0.4)
 
 
 def test_quarantined_ticker_is_rejected_not_looked_up():

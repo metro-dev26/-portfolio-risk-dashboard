@@ -355,6 +355,24 @@ def test_a_broad_market_fund_beside_bonds_is_not_called_a_concentration():
     assert "60% in equities overall" in box
 
 
+def test_bonds_beside_stocks_are_not_called_a_concentration():
+    at = _paste(AppTest.from_file(APP, default_timeout=60).run(), "AAPL 5000\nTLT 5000")
+    assert not at.exception
+    box = _diversification_box(at)
+    assert "concentrated in Govt Bonds" not in box
+    assert "50% concentrated in Technology" in box
+    assert "50% is in bonds, which are not a stock sector" in box
+
+
+def test_bonds_do_not_push_a_mixed_portfolio_into_the_danger_box():
+    at = _paste(AppTest.from_file(APP, default_timeout=60).run(),
+                "AAPL 3000\nJPM 2000\nTLT 4000\nIEF 1000")
+    box = _diversification_box(at)
+    assert "insight danger" not in box
+    assert "30% concentrated in Technology" in box
+    assert "50% is in bonds, which are not a stock sector" in box
+
+
 @pytest.mark.parametrize("label", ["Broad Market", "International"])
 def test_funds_that_span_sectors_are_left_out_of_the_sector_check_but_counted_as_equities(
         monkeypatch, fresh_cache, label):

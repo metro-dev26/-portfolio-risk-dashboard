@@ -79,7 +79,8 @@ def analyze_portfolio(holdings, *, confidence=0.95, include_backtest=True,
     w_mv = optimize.min_variance_weights(cov)
     _, _, cur_sharpe = optimize.perf(weights, mu, cov)
     _, _, ms_sharpe = optimize.perf(w_ms, mu, cov)
-    sector_pct = portfolio.sector_mix(tickers, weights, res.meta).sectors
+    mix = portfolio.sector_mix(tickers, weights, res.meta)
+    sector_pct = mix.sectors
     if sector_pct:
         top_sector = max(sector_pct, key=sector_pct.get)
         top_sector_pct = sector_pct[top_sector]
@@ -92,6 +93,7 @@ def analyze_portfolio(holdings, *, confidence=0.95, include_backtest=True,
         "min_variance_weights": {t: float(w) for t, w in zip(tickers, w_mv)},
         "top_sector": top_sector,
         "top_sector_pct": float(top_sector_pct),
+        "non_equity_pct": {k: float(v) for k, v in mix.non_equity.items()},
     }
 
     result["data"] = {
