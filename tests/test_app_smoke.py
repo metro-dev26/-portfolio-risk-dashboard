@@ -1,3 +1,4 @@
+import base64
 import json
 import shutil
 import time
@@ -10,7 +11,7 @@ import pytest
 import streamlit as st
 from streamlit.testing.v1 import AppTest
 
-from risk_engine import config, data, importer
+from risk_engine import config, data, importer, inputs, metrics
 from risk_engine import factors as fac
 from risk_engine.config import CRISES
 
@@ -184,6 +185,80 @@ def test_thin_factor_overlap_gives_a_message_not_numbers(tmp_path, monkeypatch):
     notes = " ".join(str(w.value) for w in at.warning) + " ".join(str(i.value) for i in at.info)
     assert "at least 60" in notes
     assert "Your portfolio in one sentence" not in body
+
+
+EXAMPLE_HOLDINGS = {"AAPL": 20000.0, "MSFT": 20000.0, "JPM": 20000.0, "XOM": 20000.0, "TLT": 20000.0}
+
+
+def _card(at, label):
+    return next(str(m.value) for m in at.markdown if f"big-stat-label'>{label}</div>" in str(m.value))
+
+
+def test_var_cards_show_dollars_from_the_return_not_the_return_times_the_value():
+    inp = inputs.prepare(EXAMPLE_HOLDINGS, data.load_snapshot())
+    var, cvar = metrics.historical_var_cvar(inp.pr, 0.95)
+    at = AppTest.from_file(APP, default_timeout=60).run()
+    for label, log_return in (("Historical VaR", var), ("Historical CVaR", cvar)):
+        shown = f">${abs(metrics.to_dollars(log_return, inp.value)):,.0f}</div>"
+        naive = f">${abs(log_return * inp.value):,.0f}</div>"
+        assert shown in _card(at, label)
+        assert naive not in _card(at, label)
+
+
+def test_a_bad_ticker_is_listed_even_when_it_leaves_too_few_holdings():
+    at = _paste(AppTest.from_file(APP, default_timeout=60).run(), "AAPL 10000\nXYZQQ 3000")
+    assert not at.exception
+    assert "XYZQQ" in _sidebar_text(at) and "$3,000 excluded" in _sidebar_text(at)
+    assert any("at least 2 holdings" in str(w.value) for w in at.warning)
+
+
+def test_a_holding_with_too_little_history_is_refused_with_its_reason(monkeypatch, fresh_cache):
+    monkeypatch.setattr(data, "fetch_live", _fake_live(100))
+    at = _paste(AppTest.from_file(APP, default_timeout=60).run(), "AAPL 10000\nNEWCO 5000")
+    assert not at.exception
+    assert any("NEWCO has only" in str(e.value) for e in at.error)
+    assert "Daily downside risk" not in _body(at)
+
+
+def _with_a_gap(fetch, first, last):
+    """A lookup whose history skips every session from `first` to `last`."""
+    def gapped(sym):
+        res = fetch(sym)
+        days = res.prices.index
+        return data.LiveResult(sym, "ok", "", res.prices[(days < first) | (days > last)], res.meta)
+    return gapped
+
+
+def test_a_crisis_with_too_few_clean_days_is_named_not_dropped(monkeypatch, fresh_cache):
+    monkeypatch.setattr(data, "fetch_live", _with_a_gap(_fake_live(), "2020-02-21", "2020-03-20"))
+    at = _paste(AppTest.from_file(APP, default_timeout=60).run(), "AAPL 10000\nGAPCO 5000")
+    assert not at.exception
+    (note,) = [str(c.value) for c in at.caption if "fewer than 5 clean trading days" in str(c.value)]
+    assert note.endswith("window: COVID-19 Crash")
+    assert "2025 Tariff Shock" in _body(at)
+
+
+def _heatmap(at):
+    for chart in at.get("plotly_chart"):
+        trace = json.loads(chart.proto.spec)["data"][0]
+        if trace.get("type") == "heatmap" and trace.get("zmid") == 0:
+            return trace
+    raise AssertionError("no correlation heatmap on the page")
+
+
+def test_a_holding_that_never_moves_leaves_blank_correlation_cells(monkeypatch, fresh_cache):
+    def flat(sym):
+        res = _fake_live()(sym)
+        return data.LiveResult(sym, "ok", "", res.prices * 0 + 100.0, res.meta)
+
+    monkeypatch.setattr(data, "fetch_live", flat)
+    at = _paste(AppTest.from_file(APP, default_timeout=60).run(), "AAPL 10000\nMSFT 5000\nFLAT 5000")
+    assert not at.exception
+    trace = _heatmap(at)
+    z = np.frombuffer(base64.b64decode(trace["z"]["bdata"]), dtype=trace["z"]["dtype"])
+    z = z.reshape(len(trace["x"]), -1)
+    assert np.isnan(z[2]).all() and np.isnan(z[:, 2]).all()
+    assert z[0][0] == 1.0 and -1 < z[0][1] < 1
 
 
 def _stress_traces(at):

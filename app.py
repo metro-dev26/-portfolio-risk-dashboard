@@ -28,7 +28,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from scipy.stats import norm
 
-from risk_engine import data, importer, portfolio
+from risk_engine import data, importer, inputs, portfolio, report
 from risk_engine import metrics
 from risk_engine import optimize
 from risk_engine import backtest
@@ -404,6 +404,10 @@ with st.sidebar:
 
     conf = CONFIDENCE_LEVELS[st.select_slider(
         "Confidence level", options=list(CONFIDENCE_LEVELS), value="95%")]
+    use_shrinkage = st.checkbox(
+        "Use Ledoit-Wolf shrinkage (robust covariance)", value=False,
+        help="Shrinks the noisy sample covariance toward a stable target so the "
+             "optimizer stops chasing estimation error. Standard practice on real desks.")
 
 _parsed = importer.from_rows(list(zip(_edited["Ticker"], _edited["Amount $"])))
 st.session_state.table_holdings = _parsed.holdings
@@ -417,16 +421,31 @@ if len(_parsed.holdings) > MAX_HOLDINGS:
              f"{len(_parsed.holdings)}. Combine or remove some.")
     st.stop()
 
-with st.spinner("Looking up tickers outside the dataset..."):
-    res = portfolio.resolve_holdings(_parsed.holdings, snap, live_fetch=_live,
-                                     max_live=LIVE_MAX_UI, budget_s=LIVE_BUDGET_UI_S)
 
-if res.rejected or _notes:
+@st.cache_data(ttl=3600, show_spinner=False)
+def _build_report(holdings_items, conf, shrinkage, as_of, source, _snap, _live_fetch):
+    """One report per (holdings, settings, data version). The underscore arguments are
+    not hashed: the snapshot is identified by as_of + source. The daily log returns come
+    back with the report, for the sections that compute from them directly."""
+    inp = inputs.prepare(dict(holdings_items), _snap, live_fetch=_live_fetch,
+                         max_live=LIVE_MAX_UI, budget_s=LIVE_BUDGET_UI_S, allow_rejected=True)
+    return report.report_from_inputs(inp, confidence=conf, shrinkage=shrinkage), inp.lr, inp.pr
+
+
+with st.spinner("Looking up tickers and running the numbers..."):
+    try:
+        rep, lr, pr = _build_report(tuple(_parsed.holdings.items()), conf, use_shrinkage,
+                                    snap.as_of, snap.source, snap, _live)
+    except inputs.PortfolioError as e:
+        rep, _error = None, e
+_rejected = rep["data"]["rejected"] if rep is not None else _error.rejected
+
+if _rejected or _notes:
     _lists = ""
-    if res.rejected:
+    if _rejected:
         _lists += "<strong>Not included</strong><ul>" + "".join(
-            f"<li><b>{html.escape(r.ticker)}</b> — {html.escape(r.reason)} · "
-            f"${r.amount:,.0f} excluded</li>" for r in res.rejected) + "</ul>"
+            f"<li><b>{html.escape(r['ticker'])}</b> — {html.escape(r['reason'])} · "
+            f"${r['amount']:,.0f} excluded</li>" for r in _rejected) + "</ul>"
     if _notes:
         _lists += "<strong>Import notes</strong><ul>" + "".join(
             f"<li>{html.escape(n)}</li>" for n in _notes) + "</ul>"
@@ -439,45 +458,30 @@ if data.is_stale(snap):
     st.warning(f"These prices are from {snap.as_of} — the daily refresh looks behind, so the "
                f"numbers below are not current.")
 
-if len(res.tickers) < MIN_HOLDINGS:
-    st.warning("Add at least 2 holdings with an amount above $0 to build a portfolio.")
+if rep is None:
+    if _error.problems[0]["ticker"] == inputs.HOLDINGS_PROBLEM:
+        st.warning("Add at least 2 holdings with an amount above $0 to build a portfolio.")
+    else:
+        st.error(" ".join(p["reason"] for p in _error.problems))
     st.stop()
+if rep["data"]["window_status"] == "short":
+    st.warning(rep["data"]["window_message"])
 
-selected = res.tickers
-amounts = np.array([res.holdings[t] for t in selected], dtype=float)
-port_val = float(amounts.sum())
-weights = amounts / port_val
-SECTOR = {t: res.meta[t]["sector"] for t in selected}
-ASSET_CLASS = {t: res.meta[t]["asset_class"] for t in selected}
-
-win = portfolio.portfolio_window(res.prices, selected, benchmark=snap.prices[BENCHMARK])
-if win.status == "too_short":
-    st.error(win.message)
-    st.stop()
-if win.status == "short":
-    st.warning(win.message)
-lr = win.returns
-prices = res.prices
-_link = importer.encode_share(res.holdings)
+P = rep["portfolio"]
+selected = [h["ticker"] for h in P["holdings"]]
+weights = np.array([h["weight"] for h in P["holdings"]])
+port_val = P["value"]
+SECTOR = {h["ticker"]: h["sector"] for h in P["holdings"]}
+META = {h["ticker"]: h for h in P["holdings"]}
+_link = importer.encode_share({h["ticker"]: h["amount"] for h in P["holdings"]})
 if st.query_params.get("p") != _link:
     st.query_params["p"] = _link
-
-# ── RISK ENGINE ───────────────────────────────────────────────
-ret_sel = lr[selected].dropna()
-pr = metrics.portfolio_returns(lr, selected, weights)
-mu, std = pr.mean(), pr.std()
-h_var, h_cvar = metrics.historical_var_cvar(pr, conf)
-g_var, g_cvar = metrics.gaussian_var_cvar(pr, conf)
-gap = (h_var - g_var) * port_val
-ann_vol = metrics.annualized_vol(pr)
-sharpe = metrics.sharpe_ratio(pr)
-drawdown = metrics.drawdown_series(pr)
-max_dd = metrics.max_drawdown(pr)
+R, PROF = rep["risk"], rep["profile"]
 
 # ── HERO ──────────────────────────────────────────────────────
 st.markdown(f"""
 <div class='hero'>
-    <div class='hero-eyebrow'>{html.escape(data.freshness_line(snap))} · {len(ret_sel):,} trading days analysed</div>
+    <div class='hero-eyebrow'>{html.escape(data.freshness_line(snap))} · {PROF["trading_days"]:,} trading days analysed</div>
     <div class='hero-title'>Portfolio Risk Dashboard</div>
     <div class='hero-desc'>
         How much can this portfolio lose on a bad day — and how much of that risk does a
@@ -507,21 +511,22 @@ c1, c2, c3, c4 = st.columns(4)
 with c1:
     st.markdown(f"""<div class='big-stat'>
         <div class='big-stat-label'>Historical CVaR</div>
-        <div class='big-stat-num' style='color:#ff3d5a;'>${abs(h_cvar*port_val):,.0f}</div>
+        <div class='big-stat-num' style='color:#ff3d5a;'>${abs(R["dollars"]["hist_cvar"]):,.0f}</div>
         <div class='big-stat-sub'>average loss on the worst {int(round((1 - conf) * 100))}% of days</div>
         </div>""", unsafe_allow_html=True)
 with c2:
     st.markdown(f"""<div class='big-stat'>
         <div class='big-stat-label'>Historical VaR</div>
-        <div class='big-stat-num' style='color:#ff8a5a;'>${abs(h_var*port_val):,.0f}</div>
-        <div class='big-stat-sub'>the loss threshold · {abs(h_var)*100:.2f}% of portfolio</div>
+        <div class='big-stat-num' style='color:#ff8a5a;'>${abs(R["dollars"]["hist_var"]):,.0f}</div>
+        <div class='big-stat-sub'>the loss threshold · {abs(R["hist_var"])*100:.2f}% of portfolio</div>
         </div>""", unsafe_allow_html=True)
 with c3:
     st.markdown(f"""<div class='big-stat'>
         <div class='big-stat-label'>Gaussian VaR</div>
-        <div class='big-stat-num' style='color:#4d9fff;'>${abs(g_var*port_val):,.0f}</div>
+        <div class='big-stat-num' style='color:#4d9fff;'>${abs(R["dollars"]["gaussian_var"]):,.0f}</div>
         <div class='big-stat-sub'>what a standard model reports</div>
         </div>""", unsafe_allow_html=True)
+gap = R["gap_dollars"]
 with c4:
     gap_color = "#ff3d5a" if gap < 0 else "#05d69e"
     st.markdown(f"""<div class='big-stat'>
@@ -535,8 +540,8 @@ st.markdown(f"""
     <div class='insight-icon'>{"⚠️" if gap < 0 else "💡"}</div>
     <div class='insight-text'>
         <strong>CVaR is the honest headline.</strong> VaR only tells you the threshold
-        ("{int(conf*100)}% of days you won't lose more than ${abs(h_var*port_val):,.0f}"). CVaR answers the
-        question that actually matters — <em>when it goes bad, how bad?</em> — at ${abs(h_cvar*port_val):,.0f}.
+        ("{int(conf*100)}% of days you won't lose more than ${abs(R["dollars"]["hist_var"]):,.0f}"). CVaR answers the
+        question that actually matters — <em>when it goes bad, how bad?</em> — at ${abs(R["dollars"]["hist_cvar"]):,.0f}.
         The Gaussian model here {"understates" if gap < 0 else "is close to"} the real loss threshold by
         ${abs(gap):,.0f} a day, because it assumes returns follow a bell curve and the market doesn't.
     </div>
@@ -548,10 +553,11 @@ s1, s2, s3 = st.columns(3)
 with s1:
     st.markdown(f"""<div class='big-stat'>
         <div class='big-stat-label'>Annualized Volatility</div>
-        <div class='big-stat-num' style='color:#4d9fff;'>{ann_vol*100:.1f}%</div>
+        <div class='big-stat-num' style='color:#4d9fff;'>{PROF["annual_vol"]*100:.1f}%</div>
         <div class='big-stat-sub'>standard deviation of returns</div>
         </div>""", unsafe_allow_html=True)
 with s2:
+    sharpe = PROF["sharpe"]
     sh_color = "#05d69e" if sharpe >= 1 else "#ffb347" if sharpe >= 0 else "#ff3d5a"
     st.markdown(f"""<div class='big-stat'>
         <div class='big-stat-label'>Sharpe Ratio</div>
@@ -561,110 +567,102 @@ with s2:
 with s3:
     st.markdown(f"""<div class='big-stat'>
         <div class='big-stat-label'>Maximum Drawdown</div>
-        <div class='big-stat-num' style='color:#ff3d5a;'>{max_dd*100:.1f}%</div>
+        <div class='big-stat-num' style='color:#ff3d5a;'>{PROF["max_drawdown"]*100:.1f}%</div>
         <div class='big-stat-sub'>worst peak-to-trough fall</div>
         </div>""", unsafe_allow_html=True)
 
 # ── BENCHMARK vs S&P 500 ──────────────────────────────────────
-if "SPY" in lr.columns:
-    st.markdown("<div class='sec'>Benchmark — your portfolio vs. the S&P 500</div>",
-                unsafe_allow_html=True)
-    st.caption("Every number above is more meaningful next to the market. The S&P 500 (SPY) is the "
-               "yardstick professionals measure against.")
+st.markdown("<div class='sec'>Benchmark — your portfolio vs. the S&P 500</div>",
+            unsafe_allow_html=True)
+st.caption("Every number above is more meaningful next to the market. The S&P 500 (SPY) is the "
+           "yardstick professionals measure against.")
 
-    spy_r = lr["SPY"]
-    _common = pr.index.intersection(spy_r.index)
-    prc, spyc = pr.loc[_common], spy_r.loc[_common]
 
-    b_mu, b_sd = spyc.mean(), spyc.std()
-    b_ret, b_vol = b_mu * TRADING_DAYS, b_sd * np.sqrt(TRADING_DAYS)
-    b_sharpe = (b_mu / b_sd) * np.sqrt(TRADING_DAYS) if b_sd > 0 else 0.0
-    b_wealth = np.exp(spyc.cumsum())
-    b_dd = (b_wealth / b_wealth.cummax() - 1.0).min()
-    port_ret = mu * TRADING_DAYS
-    beta = float(np.cov(prc, spyc)[0, 1] / np.var(spyc)) if np.var(spyc) > 0 else 0.0
+def _vs(p, b, higher_better=True, pct=True, dec=1):
+    better = (p > b) if higher_better else (p < b)
+    col = "#05d69e" if better else "#ff8a5a"
+    fmt = (f"{p*100:.{dec}f}%" if pct else f"{p:.2f}")
+    return col, fmt
 
-    def _vs(p, b, higher_better=True, pct=True, dec=1):
-        better = (p > b) if higher_better else (p < b)
-        col = "#05d69e" if better else "#ff8a5a"
-        fmt = (f"{p*100:.{dec}f}%" if pct else f"{p:.2f}")
-        return col, fmt
 
-    cmp_rows = [
-        ("Annualized return", port_ret, b_ret, True, True, 1),
-        ("Annualized volatility (risk)", ann_vol, b_vol, False, True, 1),
-        ("Sharpe ratio", sharpe, b_sharpe, True, False, 2),
-        ("Maximum drawdown", max_dd, b_dd, True, True, 1),  # higher (less negative) is better
-    ]
-    rows_html = ""
-    for label, p, b, hb, pct, dec in cmp_rows:
-        col, pf = _vs(p, b, hb, pct, dec)
-        bf = (f"{b*100:.{dec}f}%" if pct else f"{b:.2f}")
-        rows_html += (
-            f"<tr>"
-            f"<td style='padding:10px 14px;color:#8a9bb8;'>{label}</td>"
-            f"<td style='padding:10px 14px;text-align:right;font-family:DM Mono;font-weight:600;color:{col};'>{pf}</td>"
-            f"<td style='padding:10px 14px;text-align:right;font-family:DM Mono;color:#6a849e;'>{bf}</td>"
-            f"</tr>")
-    st.markdown(f"""
-    <table style='width:100%;border-collapse:collapse;background:var(--card);
-                  border:1px solid var(--border);border-radius:10px;overflow:hidden;'>
-        <tr style='background:#0c1220;'>
-            <th style='padding:10px 14px;text-align:left;font-family:DM Mono;font-size:10px;
-                       letter-spacing:0.15em;text-transform:uppercase;color:#5a7088;'>Metric</th>
-            <th style='padding:10px 14px;text-align:right;font-family:DM Mono;font-size:10px;
-                       letter-spacing:0.15em;text-transform:uppercase;color:#4d9fff;'>Your Portfolio</th>
-            <th style='padding:10px 14px;text-align:right;font-family:DM Mono;font-size:10px;
-                       letter-spacing:0.15em;text-transform:uppercase;color:#5a7088;'>S&amp;P 500</th>
-        </tr>
-        {rows_html}
-    </table>""", unsafe_allow_html=True)
+cmp_rows = [(r["label"], r["portfolio"], r["benchmark"], r["higher_is_better"],
+             r["kind"] == "pct", 1 if r["kind"] == "pct" else 2)
+            for r in rep["benchmark"]["rows"]]
+rows_html = ""
+for label, p, b, hb, pct, dec in cmp_rows:
+    col, pf = _vs(p, b, hb, pct, dec)
+    bf = (f"{b*100:.{dec}f}%" if pct else f"{b:.2f}")
+    rows_html += (
+        f"<tr>"
+        f"<td style='padding:10px 14px;color:#8a9bb8;'>{label}</td>"
+        f"<td style='padding:10px 14px;text-align:right;font-family:DM Mono;font-weight:600;color:{col};'>{pf}</td>"
+        f"<td style='padding:10px 14px;text-align:right;font-family:DM Mono;color:#6a849e;'>{bf}</td>"
+        f"</tr>")
+st.markdown(f"""
+<table style='width:100%;border-collapse:collapse;background:var(--card);
+              border:1px solid var(--border);border-radius:10px;overflow:hidden;'>
+    <tr style='background:#0c1220;'>
+        <th style='padding:10px 14px;text-align:left;font-family:DM Mono;font-size:10px;
+                   letter-spacing:0.15em;text-transform:uppercase;color:#5a7088;'>Metric</th>
+        <th style='padding:10px 14px;text-align:right;font-family:DM Mono;font-size:10px;
+                   letter-spacing:0.15em;text-transform:uppercase;color:#4d9fff;'>Your Portfolio</th>
+        <th style='padding:10px 14px;text-align:right;font-family:DM Mono;font-size:10px;
+                   letter-spacing:0.15em;text-transform:uppercase;color:#5a7088;'>S&amp;P 500</th>
+    </tr>
+    {rows_html}
+</table>""", unsafe_allow_html=True)
 
-    # Growth of the actual portfolio value vs the same money in the S&P
-    pg = port_val * np.exp(prc.cumsum())
-    sg = port_val * np.exp(spyc.cumsum())
-    bfig = go.Figure()
-    bfig.add_trace(go.Scatter(x=pg.index, y=pg.values, mode="lines",
-                              line=dict(color="#05d69e", width=2), name="Your portfolio"))
-    bfig.add_trace(go.Scatter(x=sg.index, y=sg.values, mode="lines",
-                              line=dict(color="#6a849e", width=2, dash="dash"), name="S&P 500"))
-    bfig.update_layout(plot_bgcolor="#0c1220", paper_bgcolor="#0c1220",
-                       font=dict(color="#dde4f0", family="DM Sans"),
-                       xaxis=dict(gridcolor="#1c2d44"),
-                       yaxis=dict(title=f"Value of ${port_val:,.0f} invested", gridcolor="#1c2d44"),
-                       height=340, margin=dict(l=20, r=20, t=10, b=20),
-                       legend=dict(bgcolor="#111d2e", bordercolor="#1c2d44"))
-    st.plotly_chart(bfig, width="stretch")
+# Growth of the actual portfolio value vs the same money in the S&P
+beta = rep["benchmark"]["beta"]
+_growth = rep["benchmark"]["growth"]
+pg = pd.Series(_growth["portfolio"]["values"], index=pd.to_datetime(_growth["portfolio"]["dates"]))
+sg = pd.Series(_growth["benchmark"]["values"], index=pd.to_datetime(_growth["benchmark"]["dates"]))
+bfig = go.Figure()
+bfig.add_trace(go.Scatter(x=pg.index, y=pg.values, mode="lines",
+                          line=dict(color="#05d69e", width=2), name="Your portfolio"))
+bfig.add_trace(go.Scatter(x=sg.index, y=sg.values, mode="lines",
+                          line=dict(color="#6a849e", width=2, dash="dash"), name="S&P 500"))
+bfig.update_layout(plot_bgcolor="#0c1220", paper_bgcolor="#0c1220",
+                   font=dict(color="#dde4f0", family="DM Sans"),
+                   xaxis=dict(gridcolor="#1c2d44"),
+                   yaxis=dict(title=f"Value of ${port_val:,.0f} invested", gridcolor="#1c2d44"),
+                   height=340, margin=dict(l=20, r=20, t=10, b=20),
+                   legend=dict(bgcolor="#111d2e", bordercolor="#1c2d44"))
+st.plotly_chart(bfig, width="stretch")
 
-    beat = "outperformed" if pg.iloc[-1] > sg.iloc[-1] else "trailed"
-    risk_word = "less" if beta < 1 else "more"
-    st.markdown(f"""
-    <div class='insight'>
-        <div class='insight-icon'>🏛️</div>
-        <div class='insight-text'>
-            <strong>Beta {beta:.2f}:</strong> your portfolio moves {abs(beta):.2f}× the market —
-            it carries <strong>{risk_word} market risk than the S&amp;P 500</strong>. Over this period
-            ${port_val:,.0f} grew to <strong>${pg.iloc[-1]:,.0f}</strong> in your portfolio vs
-            <strong>${sg.iloc[-1]:,.0f}</strong> in the index — you {beat} the market.
-            The point isn't just return — it's whether you were <em>paid for the risk you took</em>,
-            which is what the Sharpe comparison above shows.
-        </div>
-    </div>""", unsafe_allow_html=True)
+beat = "outperformed" if pg.iloc[-1] > sg.iloc[-1] else "trailed"
+risk_word = "less" if beta < 1 else "more"
+st.markdown(f"""
+<div class='insight'>
+    <div class='insight-icon'>🏛️</div>
+    <div class='insight-text'>
+        <strong>Beta {beta:.2f}:</strong> your portfolio moves {abs(beta):.2f}× the market —
+        it carries <strong>{risk_word} market risk than the S&amp;P 500</strong>. Over this period
+        ${port_val:,.0f} grew to <strong>${pg.iloc[-1]:,.0f}</strong> in your portfolio vs
+        <strong>${sg.iloc[-1]:,.0f}</strong> in the index — you {beat} the market.
+        The point isn't just return — it's whether you were <em>paid for the risk you took</em>,
+        which is what the Sharpe comparison above shows.
+    </div>
+</div>""", unsafe_allow_html=True)
 
 # ── RETURN DISTRIBUTION: ACTUAL vs GAUSSIAN ───────────────────
 st.markdown("<div class='sec'>Return distribution — actual vs what Gaussian assumes</div>",
             unsafe_allow_html=True)
 fig = go.Figure()
-fig.add_trace(go.Histogram(x=pr * 100, nbinsx=80, marker_color="#4d9fff", opacity=0.6,
-                           name="Actual daily returns", histnorm="probability density"))
-x_r = np.linspace(pr.min() * 100, pr.max() * 100, 400)
-fig.add_trace(go.Scatter(x=x_r, y=norm.pdf(x_r, mu * 100, std * 100),
+D = rep["distribution"]
+edges = D["edges"]
+fig.add_trace(go.Bar(x=[(a + b) / 2 * 100 for a, b in zip(edges, edges[1:])],
+                     y=[d / 100 for d in D["density"]],
+                     width=[(b - a) * 100 for a, b in zip(edges, edges[1:])],
+                     marker_color="#4d9fff", opacity=0.6, name="Actual daily returns"))
+x_r = np.linspace(edges[0] * 100, edges[-1] * 100, 400)
+fig.add_trace(go.Scatter(x=x_r, y=norm.pdf(x_r, D["mean"] * 100, D["std"] * 100),
                          mode="lines", line=dict(color="#ffb347", width=2.5, dash="dash"),
                          name="Gaussian assumption"))
-fig.add_vline(x=h_var * 100, line_color="#ff3d5a", line_width=2,
-              annotation_text=f"Historical VaR {h_var*100:.2f}%", annotation_font_color="#ff3d5a")
-fig.add_vline(x=g_var * 100, line_color="#4d9fff", line_width=2, line_dash="dash",
-              annotation_text=f"Gaussian VaR {g_var*100:.2f}%", annotation_font_color="#4d9fff",
+fig.add_vline(x=R["hist_var"] * 100, line_color="#ff3d5a", line_width=2,
+              annotation_text=f"Historical VaR {R['hist_var']*100:.2f}%", annotation_font_color="#ff3d5a")
+fig.add_vline(x=R["gaussian_var"] * 100, line_color="#4d9fff", line_width=2, line_dash="dash",
+              annotation_text=f"Gaussian VaR {R['gaussian_var']*100:.2f}%", annotation_font_color="#4d9fff",
               annotation_position="bottom right")
 fig.update_layout(plot_bgcolor="#0c1220", paper_bgcolor="#0c1220",
                   font=dict(color="#dde4f0", family="DM Sans"),
@@ -689,7 +687,8 @@ st.markdown("""
 st.markdown("<div class='sec'>Drawdown — how far underwater the portfolio went</div>",
             unsafe_allow_html=True)
 ddfig = go.Figure()
-ddfig.add_trace(go.Scatter(x=drawdown.index, y=drawdown.values * 100,
+dd = rep["drawdown"]
+ddfig.add_trace(go.Scatter(x=pd.to_datetime(dd["dates"]), y=np.array(dd["values"]) * 100,
                            fill="tozeroy", mode="lines",
                            line=dict(color="#ff3d5a", width=1.2),
                            fillcolor="rgba(255,61,90,0.15)", name="Drawdown"))
@@ -706,48 +705,33 @@ st.markdown("<div class='sec'>Stress test — how this exact portfolio would hav
 st.caption("Buy-and-hold your current holdings & weights through real historical crash windows. This is what risk managers actually do — past distributions break, so you pressure-test against the real thing.")
 
 
-CRISIS_COLOR = {"2018 Q4 Selloff": "#ffb347", "COVID-19 Crash": "#ff3d5a",
-                "2022 Bear Market": "#4d9fff", "2025 Tariff Shock": "#05d69e"}
-
-
-def stress(window_start, window_end):
-    """Buy-and-hold the selected portfolio across a window. Returns (total_return,
-    max_drawdown, worst_day, value_path) or None if the window isn't fully covered."""
-    wp = prices.loc[window_start:window_end, selected].dropna()
-    if len(wp) < 5:
-        return None
-    norm = wp / wp.iloc[0]
-    path = (norm * weights).sum(axis=1)          # portfolio value, starts at 1.0
-    total = path.iloc[-1] - 1.0
-    dd = (path / path.cummax() - 1.0).min()
-    worst = path.pct_change().min()
-    return total, dd, worst, path
-
-
-_missed = {c["label"]: c["missing"] for c in portfolio.crisis_coverage(prices, selected)
-           if c["missing"]}
-results = [(label, ctx, stress(s, e)) for label, s, e, ctx in CRISES if label not in _missed]
-results = [(label, ctx, r) for label, ctx, r in results if r is not None]
+CRISIS_PALETTE = ["#ffb347", "#ff3d5a", "#4d9fff", "#05d69e", "#c792ea", "#7fdbca"]
+_crisis_color = {c["label"]: CRISIS_PALETTE[i % len(CRISIS_PALETTE)]
+                 for i, c in enumerate(rep["stress"])}
+results = [c for c in rep["stress"] if c["status"] == "ok"]
+_missed = {c["label"]: c["missing"] for c in rep["stress"] if c["status"] == "not_covered"}
+_sparse = [c["label"] for c in rep["stress"] if c["status"] == "too_few_days"]
 
 if results:
     cols = st.columns(len(results))
-    for col, (label, ctx, (total, dd, worst, _)) in zip(cols, results):
+    for col, c in zip(cols, results):
         with col:
-            tcol = "#05d69e" if total >= 0 else "#ff3d5a"
+            tcol = "#05d69e" if c["total"] >= 0 else "#ff3d5a"
             col.markdown(f"""<div class='big-stat'>
-                <div class='big-stat-label'>{label}</div>
-                <div class='big-stat-num' style='color:{tcol};'>{total*100:+.1f}%</div>
-                <div class='big-stat-sub'>${abs(total*port_val):,.0f} {"gain" if total>=0 else "loss"} on ${port_val:,.0f}</div>
-                <div class='big-stat-sub' style='margin-top:8px;color:#ff8a5a;'>worst day {worst*100:.1f}% · max drawdown {dd*100:.1f}%</div>
-                <div class='big-stat-sub' style='margin-top:6px;font-style:italic;'>{ctx}</div>
+                <div class='big-stat-label'>{c["label"]}</div>
+                <div class='big-stat-num' style='color:{tcol};'>{c["total"]*100:+.1f}%</div>
+                <div class='big-stat-sub'>${abs(c["change_dollars"]):,.0f} {"gain" if c["total"]>=0 else "loss"} on ${port_val:,.0f}</div>
+                <div class='big-stat-sub' style='margin-top:8px;color:#ff8a5a;'>worst day {c["worst_day"]*100:.1f}% · max drawdown {c["max_dd"]*100:.1f}%</div>
+                <div class='big-stat-sub' style='margin-top:6px;font-style:italic;'>{c["context"]}</div>
                 </div>""", unsafe_allow_html=True)
 
     # Rebased value paths through each crisis
     sfig = go.Figure()
-    for label, _, (_, _, _, path) in results:
+    for c in results:
+        path = np.array(c["path"]["values"]) * 100
         sfig.add_trace(go.Scatter(
-            x=list(range(len(path))), y=(path.values - 1) * 100,
-            mode="lines", name=label, line=dict(color=CRISIS_COLOR[label], width=2)))
+            x=list(range(len(path))), y=path,
+            mode="lines", name=c["label"], line=dict(color=_crisis_color[c["label"]], width=2)))
     sfig.add_hline(y=0, line_color="#5a7088", line_width=1)
     sfig.update_layout(plot_bgcolor="#0c1220", paper_bgcolor="#0c1220",
                        font=dict(color="#dde4f0", family="DM Sans"),
@@ -757,14 +741,14 @@ if results:
                        legend=dict(bgcolor="#111d2e", bordercolor="#1c2d44"))
     st.plotly_chart(sfig, width="stretch")
 
-    worst_crisis = min(results, key=lambda r: r[2][0])
+    worst_crisis = min(results, key=lambda c: c["total"])
     st.markdown(f"""
     <div class='insight danger'>
         <div class='insight-icon'>🔥</div>
         <div class='insight-text'>
-            <strong>Your worst case was {worst_crisis[0]}:</strong> this portfolio would have lost
-            <strong>{abs(worst_crisis[2][0])*100:.1f}%</strong> (${abs(worst_crisis[2][0]*port_val):,.0f} on ${port_val:,.0f}),
-            with a worst single day of {worst_crisis[2][2]*100:.1f}%. Daily VaR tells you about an
+            <strong>Your worst case was {worst_crisis["label"]}:</strong> this portfolio would have lost
+            <strong>{abs(worst_crisis["total"])*100:.1f}%</strong> (${abs(worst_crisis["change_dollars"]):,.0f} on ${port_val:,.0f}),
+            with a worst single day of {worst_crisis["worst_day"]*100:.1f}%. Daily VaR tells you about an
             ordinary bad day — a stress test tells you about the days that actually end careers.
         </div>
     </div>""", unsafe_allow_html=True)
@@ -774,12 +758,16 @@ else:
 if _missed:
     st.caption("Not shown, because a holding was not yet trading: " + "; ".join(
         f"{label} ({', '.join(tickers)})" for label, tickers in _missed.items()))
+if _sparse:
+    st.caption("Not shown, because the data has fewer than 5 clean trading days in the window: "
+               + "; ".join(_sparse))
 
 # ── CORRELATION MATRIX ────────────────────────────────────────
 st.markdown("<div class='sec'>Correlation matrix — how your holdings move together</div>",
             unsafe_allow_html=True)
 st.caption("Green = move together · Red = move opposite · high correlations mean less diversification benefit")
-corr = ret_sel.corr()
+C = rep["correlation"]
+corr = pd.DataFrame(C["matrix"], index=C["tickers"], columns=C["tickers"]).astype(float)
 hm = go.Figure(go.Heatmap(
     z=corr.values, x=corr.columns, y=corr.index,
     colorscale=[[0, "#ff3d5a"], [0.5, "#0c1220"], [1, "#05d69e"]],
@@ -1041,12 +1029,6 @@ st.markdown("<div class='sec'>Optimizer — where you are vs. where the math say
 st.caption("Markowitz mean-variance optimization on your holdings (long-only, fully invested). "
            "Educational only — historical returns are a noisy guide to the future, never a promise.")
 
-with st.sidebar:
-    use_shrinkage = st.checkbox(
-        "Use Ledoit-Wolf shrinkage (robust covariance)", value=False,
-        help="Shrinks the noisy sample covariance toward a stable target so the "
-             "optimizer stops chasing estimation error. Standard practice on real desks.")
-
 mu_v = optimize.annualized_mean(lr, selected)
 cov_m = optimize.ledoit_wolf_cov(lr, selected) if use_shrinkage else optimize.sample_cov(lr, selected)
 
@@ -1125,7 +1107,7 @@ else:
                 unsafe_allow_html=True)
     realloc = pd.DataFrame({
         "Holding": selected,
-        "Type": [ASSET_CLASS[t] for t in selected],
+        "Type": [META[t]["asset_class"] for t in selected],
         "Sector": [SECTOR[t] for t in selected],
         "Now": [f"${a:,.0f}" for a in (weights * port_val)],
         "Suggested": [f"${a:,.0f}" for a in (w_ms * port_val)],
@@ -1134,7 +1116,7 @@ else:
     st.dataframe(realloc, hide_index=True, width="stretch")
 
     # Diversification / concentration insight
-    mix = portfolio.sector_mix(selected, weights, res.meta)
+    mix = portfolio.sector_mix(selected, weights, META)
     if mix.sectors:
         top_sec = max(mix.sectors, key=mix.sectors.get)
         top_sec_pct = mix.sectors[top_sec] * 100
