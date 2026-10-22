@@ -28,14 +28,8 @@ import pandas as pd
 import plotly.graph_objects as go
 from scipy.stats import norm
 
-from risk_engine import data, importer, inputs, portfolio, report, stress
-from risk_engine import metrics
-from risk_engine import optimize
-from risk_engine import backtest
-from risk_engine import factors as fac
-from risk_engine.config import (BACKTEST_MIN_OBS, BENCHMARK, CRISES, FACTOR_MIN_OBS,
-                                LIVE_BUDGET_UI_S, LIVE_MAX_UI, MAX_HOLDINGS,
-                                MIN_HOLDINGS, TRADING_DAYS)
+from risk_engine import data, importer, inputs, report, stress
+from risk_engine.config import LIVE_BUDGET_UI_S, LIVE_MAX_UI, MAX_HOLDINGS
 
 st.set_page_config(
     page_title="Portfolio Risk Dashboard",
@@ -434,14 +428,13 @@ class _Unsettled(Exception):
 @st.cache_data(ttl=3600, show_spinner=False)
 def _settled_report(holdings_items, conf, shrinkage, as_of, source, _snap, _live_fetch):
     """One report per (holdings, settings, data version). The underscore arguments are
-    not hashed: the snapshot is identified by as_of + source. The daily log returns come
-    back with the report, for the sections that compute from them directly."""
+    not hashed: the snapshot is identified by as_of + source."""
     inp = inputs.prepare(dict(holdings_items), _snap, live_fetch=_live_fetch,
                          max_live=LIVE_MAX_UI, budget_s=LIVE_BUDGET_UI_S, allow_rejected=True)
-    result = report.report_from_inputs(inp, confidence=conf, shrinkage=shrinkage), inp.lr, inp.pr
+    built = report.report_from_inputs(inp, confidence=conf, shrinkage=shrinkage)
     if any(r.retryable for r in inp.res.rejected):
-        raise _Unsettled(result)
-    return result
+        raise _Unsettled(built)
+    return built
 
 
 def _build_report(holdings_items, conf, shrinkage, snap, live_fetch):
@@ -456,8 +449,7 @@ def _build_report(holdings_items, conf, shrinkage, snap, live_fetch):
 
 with st.spinner("Looking up tickers and running the numbers..."):
     try:
-        rep, lr, pr = _build_report(tuple(_parsed.holdings.items()), conf, use_shrinkage,
-                                    snap, _live)
+        rep = _build_report(tuple(_parsed.holdings.items()), conf, use_shrinkage, snap, _live)
     except inputs.PortfolioError as e:
         rep, _error = None, e
 _rejected = rep["data"]["rejected"] if rep is not None else _error.rejected
@@ -494,7 +486,6 @@ selected = [h["ticker"] for h in P["holdings"]]
 weights = np.array([h["weight"] for h in P["holdings"]])
 port_val = P["value"]
 SECTOR = {h["ticker"]: h["sector"] for h in P["holdings"]}
-META = {h["ticker"]: h for h in P["holdings"]}
 _link = importer.encode_share({h["ticker"]: h["amount"] for h in P["holdings"]})
 if st.query_params.get("p") != _link:
     st.query_params["p"] = _link
@@ -782,7 +773,7 @@ if _missed:
         f"{label} ({', '.join(tickers)})" for label, tickers in _missed.items()))
 if _sparse:
     st.caption(f"Not shown, because the data has fewer than {stress.MIN_CRISIS_DAYS} clean "
-               f"trading days in the window: " + "; ".join(_sparse))
+               "trading days in the window: " + "; ".join(_sparse))
 
 # ── CORRELATION MATRIX ────────────────────────────────────────
 st.markdown("<div class='sec'>Correlation matrix — how your holdings move together</div>",
@@ -805,27 +796,19 @@ st.plotly_chart(hm, width="stretch")
 # ── MODEL VALIDATION: DID THE VAR ACTUALLY HOLD? ──────────────
 st.markdown("<div class='sec'>Model validation — did the risk numbers actually hold up?</div>",
             unsafe_allow_html=True)
+B = rep["backtest"]
 st.caption(f"A VaR estimate is only worth anything if it's been backtested. We roll a "
-           f"250-day window across the analysis window, and each day ask: did the real loss breach "
+           f"{B['window']}-day window across the analysis window, and each day ask: did the real loss breach "
            f"the VaR? A {int(conf*100)}% model should be breached about {int(round((1-conf)*100))}% "
            f"of the time — no more, and not in clusters. "
            f"Kupiec tests the rate; Christoffersen tests that breaches don't bunch up in crises.")
 
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def _run_backtest(returns_values, conf, window):
-    s = pd.Series(returns_values)
-    rows = backtest.backtest_var(s, conf, window, methods=("historical", "gaussian"))
-    hist = backtest.rolling_var_breaches(s, conf, window, "historical")
-    return rows, hist
-
-
-bt_rows, bt_hist = _run_backtest(pr, conf, 250)
-bt_graded = all(r["observations"] >= BACKTEST_MIN_OBS for r in bt_rows)
+bt_rows = [{"method": m, **row} for m, row in B["methods"].items()]
+bt_graded = all(r["passed"] is not None for r in bt_rows)
 
 rows_html = ""
 for row in bt_rows:
-    if row["observations"] < BACKTEST_MIN_OBS:
+    if row["passed"] is None:
         verdict, vcol = "too few days", "#5a7088"
     else:
         verdict = "PASS" if row["passed"] else "FAIL"
@@ -856,15 +839,16 @@ st.markdown(f"""
 </table>""", unsafe_allow_html=True)
 
 # Breach-timeline chart for the historical method
-bt_dates = bt_hist["dates"]
-breach_mask = bt_hist["breach"].astype(bool)
+bt_series = B["series"]
+bt_dates = pd.to_datetime(bt_series["dates"])
+bt_realized = np.array(bt_series["realized"]) * 100
+breach_mask = np.array(bt_series["breach"], dtype=bool)
 mvfig = go.Figure()
-mvfig.add_trace(go.Scatter(x=bt_dates, y=bt_hist["realized"] * 100, mode="lines",
+mvfig.add_trace(go.Scatter(x=bt_dates, y=bt_realized, mode="lines",
                            line=dict(color="#4d9fff", width=1), name="Daily return"))
-mvfig.add_trace(go.Scatter(x=bt_dates, y=bt_hist["var"] * 100, mode="lines",
+mvfig.add_trace(go.Scatter(x=bt_dates, y=np.array(bt_series["var"]) * 100, mode="lines",
                            line=dict(color="#ffb347", width=1.5, dash="dash"), name="Historical VaR"))
-mvfig.add_trace(go.Scatter(x=[d for d, m in zip(bt_dates, breach_mask) if m],
-                           y=[r * 100 for r, m in zip(bt_hist["realized"], breach_mask) if m],
+mvfig.add_trace(go.Scatter(x=bt_dates[breach_mask], y=bt_realized[breach_mask],
                            mode="markers", marker=dict(color="#ff3d5a", size=6, symbol="x"),
                            name="Breach"))
 mvfig.update_layout(plot_bgcolor="#0c1220", paper_bgcolor="#0c1220",
@@ -919,9 +903,9 @@ else:
 <div class='insight warn'>
     <div class='insight-icon'>🧪</div>
     <div class='insight-text'>
-        <strong>Too few days to judge.</strong> The first 250 days of this window are used to
+        <strong>Too few days to judge.</strong> The first {B['window']} days of this window are used to
         estimate VaR, which leaves only {_hist_row['observations']} days to test it against; at least
-        {BACKTEST_MIN_OBS} are needed before a pass or fail means anything. Historical VaR was breached
+        {B['min_observations']} are needed before a pass or fail means anything. Historical VaR was breached
         <strong>{_hist_row['breaches']}</strong> times vs <strong>{_hist_row['expected']}</strong> expected,
         and Gaussian <strong>{_gauss_row['breaches']}</strong> times — shown for reference, not as a verdict.
     </div>
@@ -933,8 +917,8 @@ st.markdown("<div class='sec'>Risk contribution — who really drives your risk,
 st.caption("A holding can be a small slice of your capital but a big slice of your risk — or the "
            "reverse. This splits total portfolio risk into how much each holding actually contributes.")
 
-_cov_rc = optimize.sample_cov(lr, selected)
-risk_pct = optimize.risk_contribution(_cov_rc, weights)
+RC = rep["risk_contribution"]
+risk_pct = np.array([r["risk_share"] for r in RC["rows"]])
 
 rcfig = go.Figure()
 rcfig.add_trace(go.Bar(x=selected, y=weights * 100, name="Capital %", marker_color="#4d9fff"))
@@ -947,12 +931,11 @@ rcfig.update_layout(barmode="group", plot_bgcolor="#0c1220", paper_bgcolor="#0c1
                     legend=dict(bgcolor="#111d2e", bordercolor="#1c2d44"))
 st.plotly_chart(rcfig, width="stretch")
 
-_gap = risk_pct - weights
-_hot = int(np.argmax(_gap))
-_div = int(np.argmin(risk_pct))
+_hot = selected.index(RC["biggest_driver"])
 _hot_txt = f"{selected[_hot]} is {weights[_hot]*100:.0f}% of your money but {risk_pct[_hot]*100:.0f}% of your risk"
 _div_txt = ""
-if risk_pct[_div] < weights[_div] - 0.02:
+if RC["diversifier"] is not None:
+    _div = selected.index(RC["diversifier"])
     _div_txt = (f" Meanwhile <strong>{selected[_div]}</strong> pulls the other way — "
                 f"{weights[_div]*100:.0f}% of capital but only {risk_pct[_div]*100:.0f}% of the risk, "
                 f"so it's working as a diversifier that calms the whole portfolio.")
@@ -974,22 +957,17 @@ st.caption("Every portfolio is a bundle of a few underlying bets. The Fama-Frenc
            "returns into three: the market, company size (small vs large), and value vs growth. "
            "Regressing this portfolio on them shows the tilts you actually hold — and how much of "
            "your risk is plain market beta vs bets you chose.")
-_factors = snap.factors
-st.caption(f"Factor data through {_factors.index.max().date()} — Ken French "
-           f"publishes monthly, so it trails prices by about a month.")
+F = rep["factors"]
+if F["data_through"]:
+    st.caption(f"Factor data through {F['data_through']} — Ken French "
+               f"publishes monthly, so it trails prices by about a month.")
 
-_factor_days = len(pr.index.intersection(_factors.index))
-if _factor_days < FACTOR_MIN_OBS:
-    st.info(f"Factor exposure needs at least {FACTOR_MIN_OBS} trading days that overlap the "
-            f"Fama-French data; this portfolio's window shares {_factor_days}, so no loadings are shown.")
+if not F["available"]:
+    st.info(F["reason"])
 else:
-    _freg = fac.factor_regression(pr, _factors)
-    _fattr = fac.variance_attribution(_freg)
-
     _LABEL = {"Mkt-RF": "Market", "SMB": "Size (small−large)", "HML": "Value (value−growth)"}
     _rows = ""
-    for name in fac.FACTOR_NAMES:
-        b = _freg["betas"][name]
+    for name, b in F["betas"].items():
         tilt = ("—" if abs(b) < 0.05 else
                 ("tilts toward " + ("small-cap" if name == "SMB" and b > 0 else
                                     "large-cap" if name == "SMB" else
@@ -1013,8 +991,8 @@ else:
     </table>""", unsafe_allow_html=True)
 
     # Variance decomposition bar
-    _names = fac.FACTOR_NAMES + ["Idiosyncratic"]
-    _vals = [_fattr[n] * 100 for n in _names]
+    _names = [*F["betas"], "Idiosyncratic"]
+    _vals = [F["variance_split"][n] * 100 for n in _names]
     _colors = ["#4d9fff", "#ffb347", "#05d69e", "#5a7088"]
     ffig = go.Figure(go.Bar(x=[_LABEL.get(n, n) for n in _names], y=_vals,
                             marker_color=_colors, text=[f"{v:.0f}%" for v in _vals],
@@ -1026,8 +1004,8 @@ else:
                        height=340, margin=dict(l=20, r=20, t=20, b=20), showlegend=False)
     st.plotly_chart(ffig, width="stretch")
 
-    _mkt_pct = _fattr["Mkt-RF"] * 100
-    _smb, _hml = _freg["betas"]["SMB"], _freg["betas"]["HML"]
+    _mkt_pct = F["variance_split"]["Mkt-RF"] * 100
+    _smb, _hml = F["betas"]["SMB"], F["betas"]["HML"]
     _size_word = "small-cap" if _smb > 0.05 else "large-cap" if _smb < -0.05 else "size-neutral"
     _val_word = "value" if _hml > 0.05 else "growth" if _hml < -0.05 else "style-neutral"
     st.markdown(f"""
@@ -1035,10 +1013,10 @@ else:
         <div class='insight-icon'>🧬</div>
         <div class='insight-text'>
             <strong>Your portfolio in one sentence:</strong> about <strong>{_mkt_pct:.0f}%</strong> of its
-            risk is plain market beta (market β = {_freg['betas']['Mkt-RF']:.2f}), with a
+            risk is plain market beta (market β = {F['betas']['Mkt-RF']:.2f}), with a
             <strong>{_size_word}</strong> tilt and a <strong>{_val_word}</strong> lean. Annualized alpha —
-            the return not explained by these three factors — is <strong>{_freg['alpha_annual']*100:+.1f}%</strong>,
-            and the model explains <strong>{_freg['r2']*100:.0f}%</strong> of the day-to-day moves (R²).
+            the return not explained by these three factors — is <strong>{F['alpha_annual']*100:+.1f}%</strong>,
+            and the model explains <strong>{F['r2']*100:.0f}%</strong> of the day-to-day moves (R²).
             Alpha this small is the honest norm: most of what a diversified portfolio does is factor exposure,
             not stock-picking magic. Factor betas here regress log excess returns on the simple Fama-French
             factors — a standard daily-frequency approximation.
@@ -1051,59 +1029,52 @@ st.markdown("<div class='sec'>Optimizer — where you are vs. where the math say
 st.caption("Markowitz mean-variance optimization on your holdings (long-only, fully invested). "
            "Educational only — historical returns are a noisy guide to the future, never a promise.")
 
-mu_v = optimize.annualized_mean(lr, selected)
-cov_m = optimize.ledoit_wolf_cov(lr, selected) if use_shrinkage else optimize.sample_cov(lr, selected)
-
-try:
-    w_ms = optimize.max_sharpe_weights(mu_v, cov_m)
-    w_mv = optimize.min_variance_weights(cov_m)
-    opt_ok = True
-except Exception:
-    opt_ok = False
+O = rep["optimizer"]
+opt_ok = O["available"]
 
 if not opt_ok:
-    st.info("Optimizer couldn't converge for this selection — try different holdings.")
+    st.info("Optimizer couldn't converge for this selection — try different holdings. ("
+            + O["reason"] + ")")
 else:
-    cur_r, cur_v, cur_s = optimize.perf(weights, mu_v, cov_m)
-    ms_r, ms_v, ms_s = optimize.perf(w_ms, mu_v, cov_m)
-    mv_r, mv_v, mv_s = optimize.perf(w_mv, mu_v, cov_m)
+    cur, ms, mv = O["current"], O["max_sharpe"], O["min_variance"]
 
     o1, o2, o3 = st.columns(3)
     with o1:
         st.markdown(f"""<div class='big-stat'>
             <div class='big-stat-label'>Your Portfolio</div>
-            <div class='big-stat-num' style='color:#4d9fff;'>{cur_s:.2f}</div>
-            <div class='big-stat-sub'>Sharpe · {cur_r*100:.1f}% return · {cur_v*100:.1f}% risk</div>
+            <div class='big-stat-num' style='color:#4d9fff;'>{cur["sharpe"]:.2f}</div>
+            <div class='big-stat-sub'>Sharpe · {cur["ret"]*100:.1f}% return · {cur["vol"]*100:.1f}% risk</div>
             </div>""", unsafe_allow_html=True)
     with o2:
         st.markdown(f"""<div class='big-stat'>
             <div class='big-stat-label'>Best Risk-Adjusted (Max Sharpe)</div>
-            <div class='big-stat-num' style='color:#05d69e;'>{ms_s:.2f}</div>
-            <div class='big-stat-sub'>Sharpe · {ms_r*100:.1f}% return · {ms_v*100:.1f}% risk</div>
+            <div class='big-stat-num' style='color:#05d69e;'>{ms["sharpe"]:.2f}</div>
+            <div class='big-stat-sub'>Sharpe · {ms["ret"]*100:.1f}% return · {ms["vol"]*100:.1f}% risk</div>
             </div>""", unsafe_allow_html=True)
     with o3:
         st.markdown(f"""<div class='big-stat'>
             <div class='big-stat-label'>Lowest Risk (Min Variance)</div>
-            <div class='big-stat-num' style='color:#ffb347;'>{mv_s:.2f}</div>
-            <div class='big-stat-sub'>Sharpe · {mv_r*100:.1f}% return · {mv_v*100:.1f}% risk</div>
+            <div class='big-stat-num' style='color:#ffb347;'>{mv["sharpe"]:.2f}</div>
+            <div class='big-stat-sub'>Sharpe · {mv["ret"]*100:.1f}% return · {mv["vol"]*100:.1f}% risk</div>
             </div>""", unsafe_allow_html=True)
 
     # Efficient frontier
-    fr_v, fr_r = optimize.efficient_frontier(mu_v, cov_m, n_points=40)
+    fr_v = [p["vol"] * 100 for p in O["frontier"]]
+    fr_r = [p["ret"] * 100 for p in O["frontier"]]
 
     effig = go.Figure()
     if fr_v:
         effig.add_trace(go.Scatter(x=fr_v, y=fr_r, mode="lines",
                                    line=dict(color="#4d9fff", width=2.5),
                                    name="Efficient frontier"))
-    effig.add_trace(go.Scatter(x=[cur_v*100], y=[cur_r*100], mode="markers",
+    effig.add_trace(go.Scatter(x=[cur["vol"]*100], y=[cur["ret"]*100], mode="markers",
                                marker=dict(color="#4d9fff", size=14, symbol="circle",
                                            line=dict(color="#fff", width=1)),
                                name="Your portfolio"))
-    effig.add_trace(go.Scatter(x=[ms_v*100], y=[ms_r*100], mode="markers",
+    effig.add_trace(go.Scatter(x=[ms["vol"]*100], y=[ms["ret"]*100], mode="markers",
                                marker=dict(color="#05d69e", size=18, symbol="star"),
                                name="Max Sharpe"))
-    effig.add_trace(go.Scatter(x=[mv_v*100], y=[mv_r*100], mode="markers",
+    effig.add_trace(go.Scatter(x=[mv["vol"]*100], y=[mv["ret"]*100], mode="markers",
                                marker=dict(color="#ffb347", size=14, symbol="diamond"),
                                name="Min variance"))
     effig.update_layout(plot_bgcolor="#0c1220", paper_bgcolor="#0c1220",
@@ -1127,54 +1098,55 @@ else:
     # Suggested reallocation (toward Max Sharpe)
     st.markdown("<div class='sec'>Suggested reallocation — to reach the best risk-adjusted mix</div>",
                 unsafe_allow_html=True)
+    moves = O["reallocation"]
     realloc = pd.DataFrame({
-        "Holding": selected,
-        "Type": [META[t]["asset_class"] for t in selected],
-        "Sector": [SECTOR[t] for t in selected],
-        "Now": [f"${a:,.0f}" for a in (weights * port_val)],
-        "Suggested": [f"${a:,.0f}" for a in (w_ms * port_val)],
-        "Change": [f"{'+' if d >= 0 else '−'}${abs(d):,.0f}" for d in ((w_ms - weights) * port_val)],
+        "Holding": [m["ticker"] for m in moves],
+        "Type": [m["asset_class"] for m in moves],
+        "Sector": [m["sector"] for m in moves],
+        "Now": [f"${m['current']:,.0f}" for m in moves],
+        "Suggested": [f"${m['suggested']:,.0f}" for m in moves],
+        "Change": [f"{'+' if m['delta_dollars'] >= 0 else '−'}${abs(m['delta_dollars']):,.0f}"
+                   for m in moves],
     })
     st.dataframe(realloc, hide_index=True, width="stretch")
 
-    # Diversification / concentration insight
-    mix = portfolio.sector_mix(selected, weights, META)
-    if mix.sectors:
-        top_sec = max(mix.sectors, key=mix.sectors.get)
-        top_sec_pct = mix.sectors[top_sec] * 100
-        conc_txt = (f"you're <strong>{top_sec_pct:.0f}% concentrated in {html.escape(top_sec)}</strong> "
-                    f"and {mix.equity*100:.0f}% in equities overall.")
-    else:
-        top_sec_pct = 0.0
-        conc_txt = f"you're {mix.equity*100:.0f}% in equities overall." if mix.equity else ""
-    diversified_txt = (f"{mix.diversified*100:.0f}% is in broad-market or international funds, "
-                       f"which spread across many sectors." if mix.diversified else "")
-    unplaced_txt = (f"{mix.unplaced*100:.0f}% is in holdings whose sector isn't known here, so it is "
-                    f"left out of that check." if mix.unplaced else "")
-    non_equity_parts = [f"{share*100:.0f}% is in {NON_EQUITY_LABEL.get(cls, cls.lower())}"
-                        for cls, share in mix.non_equity.items()]
-    non_equity_txt = (f"{' and '.join(non_equity_parts)}, which are not a stock sector."
-                      if non_equity_parts else "")
+# Diversification / concentration insight. The sector mix needs no optimizer, so it shows either way.
+SM = O["sector_mix"]
+if SM["sectors"]:
+    top_sec_pct = SM["top_sector_pct"] * 100
+    conc_txt = (f"you're <strong>{top_sec_pct:.0f}% concentrated in {html.escape(SM['top_sector'])}</strong> "
+                f"and {SM['equity']*100:.0f}% in equities overall.")
+else:
+    conc_txt = f"you're {SM['equity']*100:.0f}% in equities overall." if SM["equity"] else ""
+diversified_txt = (f"{SM['diversified']*100:.0f}% is in broad-market or international funds, "
+                   "which spread across many sectors." if SM["diversified"] else "")
+unplaced_txt = (f"{SM['unplaced']*100:.0f}% is in holdings whose sector isn't known here, so it is "
+                "left out of that check." if SM["unplaced"] else "")
+non_equity_parts = [f"{share*100:.0f}% is in {NON_EQUITY_LABEL.get(cls, cls.lower())}"
+                    for cls, share in SM["non_equity"].items()]
+non_equity_txt = (f"{' and '.join(non_equity_parts)}, which are not a stock sector."
+                  if non_equity_parts else "")
 
-    # Biggest suggested moves, in plain language
-    deltas = (w_ms - weights)
-    add_idx = [i for i in np.argsort(deltas)[::-1] if deltas[i] > 0.01][:2]
-    trim_idx = [i for i in np.argsort(deltas) if deltas[i] < -0.01][:2]
-    add_txt = ", ".join(f"{selected[i]} ({html.escape(SECTOR[selected[i]])})" for i in add_idx) or "none"
-    trim_txt = ", ".join(selected[i] for i in trim_idx) or "none"
+# Biggest suggested moves, in plain language; there are none to suggest when the solve failed
+opt_txt = ""
+if opt_ok:
+    add_txt = ", ".join(f"{t} ({html.escape(SECTOR[t])})" for t in O["adds"]) or "none"
+    trim_txt = ", ".join(O["trims"]) or "none"
+    opt_txt = (" To climb toward the best risk-adjusted mix, the optimizer would "
+               f"<strong>add to {add_txt}</strong> and <strong>trim {trim_txt}</strong> — "
+               f"lifting your Sharpe from <strong>{cur['sharpe']:.2f}</strong> to "
+               f"<strong>{ms['sharpe']:.2f}</strong> "
+               f"({'more return for the same risk' if ms['sharpe'] > cur['sharpe'] else 'already near optimal'}).")
 
-    conc = "danger" if top_sec_pct >= 50 else "warn"
-    st.markdown(f"""
-    <div class='insight {conc}'>
-        <div class='insight-icon'>{"⚠️" if top_sec_pct >= 50 else "🧭"}</div>
-        <div class='insight-text'>
-            <strong>Diversification check:</strong> {conc_txt} {non_equity_txt} {diversified_txt} {unplaced_txt} To climb toward the best risk-adjusted mix, the
-            optimizer would <strong>add to {add_txt}</strong> and <strong>trim {trim_txt}</strong> —
-            lifting your Sharpe from <strong>{cur_s:.2f}</strong> to <strong>{ms_s:.2f}</strong>
-            ({"more return for the same risk" if ms_s > cur_s else "already near optimal"}).
-            Spreading across sectors and adding bonds is what flattens the crash damage you saw in the stress test above.
-        </div>
-    </div>""", unsafe_allow_html=True)
+conc = "danger" if SM["concentrated"] else "warn"
+st.markdown(f"""
+<div class='insight {conc}'>
+    <div class='insight-icon'>{"⚠️" if SM["concentrated"] else "🧭"}</div>
+    <div class='insight-text'>
+        <strong>Diversification check:</strong> {conc_txt} {non_equity_txt} {diversified_txt} {unplaced_txt}{opt_txt}
+        Spreading across sectors and adding bonds is what flattens the crash damage you saw in the stress test above.
+    </div>
+</div>""", unsafe_allow_html=True)
 
 # ── MONTE CARLO SIMULATION ────────────────────────────────────
 st.markdown("<div class='sec'>Monte Carlo — ten thousand possible futures for this portfolio</div>",
@@ -1183,20 +1155,12 @@ st.caption("Each future is built by resampling this portfolio's actual historica
            "(bootstrap), so it keeps the real fat tails a bell-curve model smooths away. "
            "Educational projection, not a forecast.")
 
-HORIZON_DAYS = {"6 months": 126, "1 year": 252, "2 years": 504, "3 years": 756}
+MC = rep["monte_carlo"]
+HORIZON_DAYS = {h["label"]: h["days"] for h in MC["horizons"]}
 mc_h = HORIZON_DAYS[st.select_slider("Time horizon", options=list(HORIZON_DAYS), value="1 year")]
-
-_rng = np.random.default_rng(42)
-N_SIMS = 10_000
-hist_r = pr.to_numpy()
-_draws = _rng.integers(0, len(hist_r), size=(N_SIMS, mc_h))
-sim_paths = port_val * np.exp(np.cumsum(hist_r[_draws], axis=1))   # N x H
-terminal = sim_paths[:, -1]
-
-bands = np.percentile(sim_paths, [5, 25, 50, 75, 95], axis=0)
-t5, t50, t95 = np.percentile(terminal, [5, 50, 95])
-prob_loss = float((terminal < port_val).mean())
-prob_up20 = float((terminal >= port_val * 1.2).mean())
+H = next(h for h in MC["horizons"] if h["days"] == mc_h)
+t5, t50 = H["p5"], H["p50"]
+prob_loss, prob_up20 = H["prob_loss"], H["prob_up20"]
 
 m1, m2, m3, m4 = st.columns(4)
 with m1:
@@ -1225,12 +1189,14 @@ with m4:
         </div>""", unsafe_allow_html=True)
 
 # Fan chart — the cone of outcomes over time
-_x = list(range(1, mc_h + 1))
+k = MC["band_days"].index(mc_h)
+_x = MC["band_days"][:k + 1]
+bands = [MC["bands"][f"p{p}"][:k + 1] for p in (5, 25, 50, 75, 95)]
 mcfig = go.Figure()
-mcfig.add_trace(go.Scatter(x=_x + _x[::-1], y=list(bands[4]) + list(bands[0][::-1]),
+mcfig.add_trace(go.Scatter(x=_x + _x[::-1], y=bands[4] + bands[0][::-1],
                            fill="toself", fillcolor="rgba(77,159,255,0.10)",
                            line=dict(width=0), name="5–95% range", hoverinfo="skip"))
-mcfig.add_trace(go.Scatter(x=_x + _x[::-1], y=list(bands[3]) + list(bands[1][::-1]),
+mcfig.add_trace(go.Scatter(x=_x + _x[::-1], y=bands[3] + bands[1][::-1],
                            fill="toself", fillcolor="rgba(77,159,255,0.22)",
                            line=dict(width=0), name="25–75% range", hoverinfo="skip"))
 mcfig.add_trace(go.Scatter(x=_x, y=bands[2], mode="lines",
@@ -1250,12 +1216,12 @@ st.markdown(f"""
     <div class='insight-icon'>🔮</div>
     <div class='insight-text'>
         <strong>How to read this:</strong> the green line is the most likely path; the shaded
-        bands are where the portfolio lands {{}} of the time. Across 10,000 simulated futures,
-        the middle outcome is <strong>${t50:,.0f}</strong>, but 1 year in 20 it falls to
+        bands are where the portfolio lands 50–90% of the time. Across {MC['n_sims']:,} simulated futures,
+        the middle outcome is <strong>${t50:,.0f}</strong>, but 1 in 20 times, after {H['label']}, it falls to
         <strong>${t5:,.0f}</strong> or worse. The fan widening over time is the honest truth about
         investing — <strong>the further out you look, the less certain anything is.</strong>
     </div>
-</div>""".replace("{}", "50–90%"), unsafe_allow_html=True)
+</div>""", unsafe_allow_html=True)
 
 # ── HONEST FOOTER: LIMITATIONS ────────────────────────────────
 st.markdown("<div class='sec'>What this model assumes — and where it can be wrong</div>",

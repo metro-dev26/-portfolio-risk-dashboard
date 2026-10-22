@@ -12,7 +12,7 @@ import streamlit as st
 from streamlit.runtime.caching import cache_utils
 from streamlit.testing.v1 import AppTest
 
-from risk_engine import config, data, importer, inputs, metrics
+from risk_engine import config, data, importer, inputs, metrics, optimize, report
 from risk_engine import factors as fac
 from risk_engine.config import CRISES
 
@@ -154,8 +154,7 @@ def _with_upload(monkeypatch, text, size=None):
     monkeypatch.setattr(st, "file_uploader", lambda *args, **kwargs: _Upload(text, size))
 
 
-def test_short_history_shows_backtest_numbers_without_a_verdict(monkeypatch):
-    st.cache_data.clear()
+def test_short_history_shows_backtest_numbers_without_a_verdict(monkeypatch, fresh_cache):
     monkeypatch.setattr(data, "fetch_live", _fake_live(300))
     at = _paste(AppTest.from_file(APP, default_timeout=60).run(), "AAPL 10000\nNEWCO 5000")
     assert not at.exception
@@ -165,8 +164,7 @@ def test_short_history_shows_backtest_numbers_without_a_verdict(monkeypatch):
     assert any("trading days" in str(w.value) for w in at.warning)      # the short-window warning
 
 
-def test_crisis_a_holding_missed_is_named_not_dropped(monkeypatch):
-    st.cache_data.clear()
+def test_crisis_a_holding_missed_is_named_not_dropped(monkeypatch, fresh_cache):
     monkeypatch.setattr(data, "fetch_live", _fake_live(300))
     at = _paste(AppTest.from_file(APP, default_timeout=60).run(), "AAPL 10000\nNEWCO 5000")
     notes = " ".join(str(c.value) for c in at.caption) + " ".join(str(i.value) for i in at.info)
@@ -406,8 +404,7 @@ def test_add_holding_to_the_untouched_example_starts_a_new_portfolio():
     assert at.session_state["holdings"] == {"NVDA": 10000.0}
 
 
-def test_factor_section_reads_the_loaded_snapshot_not_a_second_load(monkeypatch):
-    st.cache_data.clear()
+def test_factor_section_reads_the_loaded_snapshot_not_a_second_load(monkeypatch, fresh_cache):
     loaded = data.load_snapshot().factors
     monkeypatch.setattr(fac, "load_factors", lambda: loaded.iloc[:100])
     at = AppTest.from_file(APP, default_timeout=60).run()
@@ -503,16 +500,14 @@ def test_funds_that_span_sectors_are_left_out_of_the_sector_check_but_counted_as
     assert "50% is in broad-market or international funds, which spread across many sectors" in box
 
 
-def test_sector_text_from_yahoo_is_escaped(monkeypatch):
-    st.cache_data.clear()
+def test_sector_text_from_yahoo_is_escaped(monkeypatch, fresh_cache):
     monkeypatch.setattr(data, "fetch_live", _fake_live(sector="<img src=x onerror=alert(1)>"))
     at = _paste(AppTest.from_file(APP, default_timeout=60).run(), "AAPL 1000\nEVIL 9000")
     body = _body(at)
     assert "&lt;img src=x" in body and "<img src=x" not in body
 
 
-def test_a_yahoo_outage_is_not_retried_on_every_rerun(monkeypatch):
-    st.cache_data.clear()
+def test_a_yahoo_outage_is_not_retried_on_every_rerun(monkeypatch, fresh_cache):
     calls = []
 
     def down(sym):
@@ -539,8 +534,7 @@ def _quantity_csv(*extra):
     return "Symbol,Quantity\nAAPL,10\n" + "".join(f"{t},1\n" for t in extra)
 
 
-def test_csv_share_counts_are_valued_with_a_capped_number_of_lookups(monkeypatch):
-    st.cache_data.clear()
+def test_csv_share_counts_are_valued_with_a_capped_number_of_lookups(monkeypatch, fresh_cache):
     calls = []
     fetch = _fake_live()
     monkeypatch.setattr(data, "fetch_live", lambda sym: (calls.append(sym), fetch(sym))[1])
@@ -553,8 +547,7 @@ def test_csv_share_counts_are_valued_with_a_capped_number_of_lookups(monkeypatch
     assert "no price for ZZD" in _sidebar_text(at)
 
 
-def test_csv_share_count_lookups_stop_when_the_time_budget_is_spent(monkeypatch):
-    st.cache_data.clear()
+def test_csv_share_count_lookups_stop_when_the_time_budget_is_spent(monkeypatch, fresh_cache):
     calls = []
     fetch = _fake_live()
 
@@ -602,3 +595,82 @@ def test_app_csv_cap_sits_exactly_at_the_servers_upload_limit(
     assert not at.exception
     assert bool(at.sidebar.error) is refused
     assert bool([b for b in at.button if b.key == "load_csv"]) is not refused
+
+
+def _trace(at, name):
+    for chart in at.get("plotly_chart"):
+        for trace in json.loads(chart.proto.spec)["data"]:
+            if trace.get("name") == name:
+                return trace
+    raise AssertionError(f"no chart trace named {name!r} on the page")
+
+
+def _markdown_with(at, text):
+    return next(str(m.value) for m in at.markdown if text in str(m.value))
+
+
+def test_monte_carlo_cards_and_fan_follow_the_horizon_slider(fresh_cache):
+    horizons = {h["label"]: h for h in report.build_report(EXAMPLE_HOLDINGS)["monte_carlo"]["horizons"]}
+    at = AppTest.from_file(APP, default_timeout=60).run()
+    assert not at.exception
+    next(s for s in at.select_slider if s.label == "Time horizon").set_value("6 months").run()
+    assert not at.exception
+    assert f">${horizons['6 months']['p5']:,.0f}</div>" in _card(at, "Bad Case (5th %ile)")
+    assert f">${horizons['6 months']['p50']:,.0f}</div>" in _card(at, "Median Outcome")
+    insight = _markdown_with(at, "Across 10,000 simulated futures")
+    assert "1 in 20 times, after 6 months, it falls to" in insight and "50–90%" in insight
+    median = _trace(at, "Median path")
+    days, values = _numbers(median["x"]), _numbers(median["y"])
+    assert days[0] == 0 and days[-1] == 126
+    assert values[0] == 100_000.0                      # the fan starts at what was invested
+
+
+def test_an_unconverged_optimizer_keeps_the_diversification_check_and_says_why(
+        monkeypatch, fresh_cache):
+    def no_solution(mu, cov):
+        raise optimize.OptimizerError("the optimizer did not converge (test)")
+
+    monkeypatch.setattr(optimize, "max_sharpe_weights", no_solution)
+    at = AppTest.from_file(APP, default_timeout=60).run()
+    assert not at.exception
+    notes = " ".join(str(i.value) for i in at.info)
+    assert "Optimizer couldn't converge" in notes and "did not converge (test)" in notes
+    box = _diversification_box(at)
+    assert "concentrated in" in box and "Spreading across sectors" in box
+    assert "optimizer would" not in box and "Sharpe" not in box
+    assert not [df for df in at.dataframe if "Suggested" in df.value.columns]
+
+
+def test_reallocation_table_shows_each_holdings_class_and_the_reports_suggested_dollars(fresh_cache):
+    moves = report.build_report(EXAMPLE_HOLDINGS)["optimizer"]["reallocation"]
+    at = AppTest.from_file(APP, default_timeout=60).run()
+    (table,) = [df.value for df in at.dataframe if "Suggested" in df.value.columns]
+    assert list(table["Holding"]) == list(EXAMPLE_HOLDINGS)
+    assert list(table["Type"]) == ["Equity", "Equity", "Equity", "Equity", "Bond"]
+    assert list(table["Suggested"]) == [f"${m['suggested']:,.0f}" for m in moves]
+    assert set(table["Now"]) == {"$20,000"}
+
+
+def test_backtest_table_and_scoreboard_follow_the_report_on_a_full_history(fresh_cache):
+    methods = report.build_report(EXAMPLE_HOLDINGS)["backtest"]["methods"]
+    body = _body(AppTest.from_file(APP, default_timeout=60).run())
+    assert "The honest scoreboard" in body and "Too few days to judge" not in body
+    table_rows = body.split("</tr>")
+    for method, row in methods.items():
+        (shown,) = [r for r in table_rows if f">{method}</td>" in r]
+        assert f">{'PASS' if row['passed'] else 'FAIL'}</td>" in shown
+        assert f">{row['breaches']}</td>" in shown
+
+
+def test_risk_contribution_and_factor_sections_show_the_reports_numbers(fresh_cache):
+    rep = report.build_report(EXAMPLE_HOLDINGS)
+    rc, fx = rep["risk_contribution"], rep["factors"]
+    at = AppTest.from_file(APP, default_timeout=60).run()
+    drivers = _markdown_with(at, "Concentration hides here")
+    assert f"<strong>{rc['biggest_driver']} is " in drivers
+    assert (f"<strong>{rc['diversifier']}</strong> pulls the other way" in drivers) is (
+        rc["diversifier"] is not None)
+    summary = _markdown_with(at, "Your portfolio in one sentence")
+    assert f"market β = {fx['betas']['Mkt-RF']:.2f}" in summary
+    assert f"<strong>{fx['variance_split']['Mkt-RF'] * 100:.0f}%</strong> of its" in summary
+    assert f"<strong>{fx['alpha_annual'] * 100:+.1f}%</strong>" in summary
