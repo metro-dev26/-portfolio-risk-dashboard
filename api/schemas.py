@@ -121,7 +121,7 @@ class ProblemResponse(BaseModel):
 
 
 class UnavailableResponse(BaseModel):
-    """503 body from /analyze when no market-data snapshot can be read."""
+    """503 body from /analyze and /report when no market-data snapshot can be read."""
     detail: str
 
 
@@ -146,3 +146,243 @@ class PortfolioOut(BaseModel):
     name: str
     holdings: dict[str, float]
     created_at: str
+
+
+class ReportRequest(BaseModel):
+    holdings: dict[str, float]
+    confidence: float = Field(default=0.95, ge=0.90, le=0.99)
+    shrinkage: bool = False     # Ledoit-Wolf covariance for the optimizer
+
+    @field_validator("holdings")
+    @classmethod
+    def _check(cls, v):
+        return validate_holdings(v)
+
+
+class Series(BaseModel):
+    dates: list[str]
+    values: list[float]
+
+
+class ScoreOut(BaseModel):
+    score: int
+    bad_year_loss: float
+    loss_dollars: float
+    gain_dollars: float
+
+
+class ScoreSection(BaseModel):
+    portfolio: ScoreOut
+    benchmark: ScoreOut
+    horizon_days: int
+
+
+class HoldingOut(BaseModel):
+    ticker: str
+    name: str
+    sector: str
+    type: str
+    asset_class: str
+    amount: float
+    weight: float
+    source: str
+
+
+class PortfolioSection(BaseModel):
+    value: float
+    holdings: list[HoldingOut]
+
+
+class RiskSection(BaseModel):
+    confidence: float
+    hist_var: float
+    hist_cvar: float
+    gaussian_var: float
+    gaussian_cvar: float
+    dollars: dict[str, float]
+    gap_dollars: float
+
+
+class ProfileSection(BaseModel):
+    annual_return: float
+    annual_vol: float
+    sharpe: float
+    max_drawdown: float
+    trading_days: int
+
+
+class CompareRow(BaseModel):
+    label: str
+    portfolio: float
+    benchmark: float
+    higher_is_better: bool
+    kind: str
+
+
+class BenchmarkSection(BaseModel):
+    rows: list[CompareRow]
+    beta: float
+    growth: dict[str, Series]
+
+
+class DistributionSection(BaseModel):
+    edges: list[float]
+    density: list[float]
+    mean: float
+    std: float
+
+
+class CrisisOut(BaseModel):
+    label: str
+    context: str
+    start: str
+    end: str
+    status: str
+    missing: list[str]
+    total: Optional[float]
+    worst_day: Optional[float]
+    max_dd: Optional[float]
+    loss_dollars: Optional[float]
+    path: Optional[Series]
+
+
+class CorrelationSection(BaseModel):
+    tickers: list[str]
+    matrix: list[list[Optional[float]]]     # null where a holding's price never moved
+
+
+class BacktestSeries(BaseModel):
+    dates: list[str]
+    var: list[float]
+    realized: list[float]
+    breach: list[int]
+
+
+class BacktestSection(BaseModel):
+    window: int
+    min_observations: int
+    methods: dict[str, BacktestRow]
+    series: BacktestSeries
+
+
+class RiskShare(BaseModel):
+    ticker: str
+    weight: float
+    risk_share: float
+
+
+class RiskContributionSection(BaseModel):
+    rows: list[RiskShare]
+    biggest_driver: str
+    diversifier: Optional[str]
+
+
+class FactorsSection(BaseModel):
+    available: bool
+    reason: str
+    data_through: Optional[str]
+    betas: Optional[dict[str, float]]
+    alpha_annual: Optional[float]
+    r2: Optional[float]
+    variance_split: Optional[dict[str, float]]
+    observations: int
+
+
+class SectorMixOut(BaseModel):
+    sectors: dict[str, float]
+    equity: float
+    diversified: float
+    unplaced: float
+    non_equity: dict[str, float]
+    top_sector: Optional[str]
+    top_sector_pct: float
+    concentrated: bool
+
+
+class OptPoint(BaseModel):
+    ret: float
+    vol: float
+    sharpe: float
+    weights: dict[str, float]
+
+
+class FrontierPoint(BaseModel):
+    vol: float
+    ret: float
+
+
+class ReallocRow(BaseModel):
+    ticker: str
+    asset_class: str
+    sector: str
+    current: float
+    suggested: float
+    delta_dollars: float
+
+
+class OptimizerSection(BaseModel):
+    available: bool
+    reason: str
+    shrinkage: bool
+    sector_mix: SectorMixOut
+    current: Optional[OptPoint]
+    max_sharpe: Optional[OptPoint]
+    min_variance: Optional[OptPoint]
+    frontier: list[FrontierPoint]
+    reallocation: list[ReallocRow]
+    adds: list[str]
+    trims: list[str]
+
+
+class HorizonOut(BaseModel):
+    label: str
+    days: int
+    p5: float
+    p50: float
+    p95: float
+    prob_loss: float
+    prob_up20: float
+
+
+class MonteCarloSection(BaseModel):
+    n_sims: int
+    seed: int
+    value: float
+    band_days: list[int]
+    bands: dict[str, list[float]]
+    horizons: list[HorizonOut]
+
+
+class RejectedOut(BaseModel):
+    ticker: str
+    amount: float
+    reason: str
+
+
+class ReportData(BaseModel):
+    as_of: str
+    window_start: str
+    window_end: str
+    window_days: int
+    window_status: str
+    window_message: str
+    rejected: list[RejectedOut]
+    assumptions: list[str]
+
+
+class ReportResponse(BaseModel):
+    score: ScoreSection
+    portfolio: PortfolioSection
+    risk: RiskSection
+    profile: ProfileSection
+    benchmark: BenchmarkSection
+    distribution: DistributionSection
+    drawdown: Series
+    stress: list[CrisisOut]
+    correlation: CorrelationSection
+    backtest: BacktestSection
+    risk_contribution: RiskContributionSection
+    factors: FactorsSection
+    optimizer: OptimizerSection
+    monte_carlo: MonteCarloSection
+    data: ReportData

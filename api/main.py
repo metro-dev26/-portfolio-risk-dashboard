@@ -7,13 +7,17 @@ import math
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 
 from api import store
 from api.schemas import (AnalyzeRequest, AnalyzeResponse, DegradedResponse, PortfolioIn,
-                         PortfolioOut, ProblemResponse, UnavailableResponse)
+                         PortfolioOut, ProblemResponse, ReportRequest, ReportResponse,
+                         UnavailableResponse)
 from risk_engine import data
-from risk_engine.analyze import PortfolioError, analyze_portfolio
+from risk_engine.analyze import analyze_portfolio
+from risk_engine.inputs import PortfolioError
+from risk_engine.report import build_report
 
 log = logging.getLogger(__name__)
 
@@ -23,6 +27,7 @@ app = FastAPI(
                 "Educational — not financial advice.",
     version="1.0.0",
 )
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
 def _json_safe(obj):
@@ -78,6 +83,26 @@ def _analyze_or_http_error(holdings, **kwargs):
 def analyze(req: AnalyzeRequest):
     return _analyze_or_http_error(req.holdings, confidence=req.confidence,
                                   include_backtest=req.include_backtest)
+
+
+def _report_or_http_error(holdings, **kwargs):
+    try:
+        return build_report(holdings, **kwargs)
+    except PortfolioError as e:
+        raise HTTPException(status_code=422, detail={"problems": e.problems})
+    except data.SnapshotUnavailable as e:
+        raise HTTPException(status_code=503, detail=f"market data is unavailable: {e}")
+
+
+@app.post("/report", response_model=ReportResponse, responses={
+    422: {"model": ProblemResponse,
+          "description": "The holdings were refused: `detail.problems` gives one "
+                         "`{ticker, reason}` per ticker."},
+    503: {"model": UnavailableResponse, "description": "No market-data snapshot could be read."}})
+def report(req: ReportRequest):
+    """Everything the dashboard shows for one portfolio, in one call: the 1-99 risk score
+    beside the S&P 500's, the bad-year dollar range, and every detail section."""
+    return _report_or_http_error(req.holdings, confidence=req.confidence, shrinkage=req.shrinkage)
 
 
 @app.post("/portfolios", response_model=PortfolioOut)
