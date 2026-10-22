@@ -78,3 +78,4 @@ STALE_BUSINESS_DAYS = 3
 
 LIVE_MAX_API, LIVE_BUDGET_API_S = 5, 10.0
 LIVE_MAX_UI, LIVE_BUDGET_UI_S = 20, 40.0
+CONCENTRATION_LIMIT = 0.50  # a stock sector this large of the portfolio is a concentration
