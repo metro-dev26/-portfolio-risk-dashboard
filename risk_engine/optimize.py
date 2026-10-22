@@ -4,6 +4,10 @@ from scipy.optimize import minimize
 from risk_engine.config import TRADING_DAYS
 
 
+class OptimizerError(RuntimeError):
+    """The solver did not converge, so its weights would be noise."""
+
+
 def annualized_mean(log_returns, holdings):
     return (log_returns[holdings].mean() * TRADING_DAYS).to_numpy()
 
@@ -50,8 +54,10 @@ def _solve(objective, n):
     cons = ({"type": "eq", "fun": lambda w: w.sum() - 1.0},)
     bnds = tuple((0.0, 1.0) for _ in range(n))
     w0 = np.ones(n) / n
-    w = minimize(objective, w0, method="SLSQP", bounds=bnds, constraints=cons).x
-    w = np.clip(w, 0, None)
+    res = minimize(objective, w0, method="SLSQP", bounds=bnds, constraints=cons)
+    if not res.success:
+        raise OptimizerError(f"the optimizer did not converge ({res.message})")
+    w = np.clip(res.x, 0, None)
     return w / w.sum()
 
 

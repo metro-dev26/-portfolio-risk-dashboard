@@ -19,6 +19,7 @@ class PortfolioError(ValueError):
 
 
 FACTORS_PROBLEM = "(factors)"
+OPTIMIZER_PROBLEM = "(optimizer)"
 NO_IDENTIFIABLE_SECTOR = "None identifiable"
 
 
@@ -75,8 +76,11 @@ def analyze_portfolio(holdings, *, confidence=0.95, include_backtest=True,
 
     mu = optimize.annualized_mean(lr, tickers)
     cov = optimize.sample_cov(lr, tickers)
-    w_ms = optimize.max_sharpe_weights(mu, cov)
-    w_mv = optimize.min_variance_weights(cov)
+    try:
+        w_ms = optimize.max_sharpe_weights(mu, cov)
+        w_mv = optimize.min_variance_weights(cov)
+    except optimize.OptimizerError as e:
+        raise PortfolioError([{"ticker": OPTIMIZER_PROBLEM, "reason": str(e)}]) from e
     _, _, cur_sharpe = optimize.perf(weights, mu, cov)
     _, _, ms_sharpe = optimize.perf(w_ms, mu, cov)
     mix = portfolio.sector_mix(tickers, weights, res.meta)

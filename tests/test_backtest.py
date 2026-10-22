@@ -85,3 +85,13 @@ def test_backtest_var_rows_count_their_out_of_sample_days():
     r = _normal_series(n=700)
     for row in backtest.backtest_var(r, conf=0.95, window=250):
         assert row["observations"] == 450
+
+
+def test_each_backtest_row_carries_its_rolling_series(normal_returns):
+    r = normal_returns.iloc[:600]
+    rows = backtest.backtest_var(r, 0.95, 250)
+    hist = backtest.rolling_var_breaches(r, 0.95, 250, "historical")
+    series = rows[0]["series"]
+    assert rows[0]["method"] == "historical"
+    assert list(series["breach"]) == list(hist["breach"])
+    assert int(series["breach"].sum()) == rows[0]["breaches"]

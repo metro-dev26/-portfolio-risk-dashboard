@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from risk_engine import optimize
 from tests.conftest import HOLDINGS
 
@@ -39,3 +40,12 @@ def test_optimizer_reproduces_golden(market, ref_weights, golden):
     assert abs(optimize.perf(w_mv, mu_v, cov)[2] - golden["min_var_sharpe"]) < 1e-4
     rc = optimize.risk_contribution(cov, ref_weights)
     assert np.allclose(rc, golden["risk_pct"], atol=1e-9)
+
+
+def test_a_solver_that_does_not_converge_raises_instead_of_returning_noise(monkeypatch):
+    import types
+    fake = types.SimpleNamespace(success=False, message="Iteration limit reached",
+                                 x=np.array([0.9, 0.1]))
+    monkeypatch.setattr(optimize, "minimize", lambda *a, **k: fake)
+    with pytest.raises(optimize.OptimizerError, match="Iteration limit reached"):
+        optimize.min_variance_weights(np.eye(2))

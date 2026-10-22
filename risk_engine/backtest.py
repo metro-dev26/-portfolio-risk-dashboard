@@ -81,5 +81,6 @@ def backtest_var(port_returns, conf, window=250, methods=("historical", "gaussia
             "expected": round(n * (1 - conf), 1),
             "kupiec_p": kp, "christoffersen_p": cp,
             "passed": bool(kp > 0.05 and cp > 0.05),
+            "series": res,
         })
     return rows

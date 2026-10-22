@@ -51,3 +51,19 @@ def student_t_var_cvar(port_returns, conf):
     es_std = -(df + q ** 2) / (df - 1) * _t.pdf(q, df) / alpha
     cvar = float(loc + scale * es_std)
     return var, cvar
+
+
+def to_dollars(log_r, value):
+    """The dollar change a log return means on `value`: exp(r) - 1, not r."""
+    return float(np.expm1(log_r) * value)
+
+
+def return_histogram(port_returns, bins=80):
+    """Daily returns binned as a probability density (area sums to 1)."""
+    density, edges = np.histogram(np.asarray(port_returns, dtype=float), bins=bins, density=True)
+    return {"edges": edges.tolist(), "density": density.tolist()}
+
+
+def correlation(log_returns, tickers):
+    tickers = list(tickers)
+    return {"tickers": tickers, "matrix": log_returns[tickers].corr().to_numpy().tolist()}
