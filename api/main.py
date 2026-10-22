@@ -4,16 +4,18 @@ Swagger UI at /docs is the point. Educational tool, not financial advice."""
 import functools
 import logging
 import math
+import os
 import re
 from contextlib import contextmanager
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 
-from api import store
+from api import limits, store
 from api.schemas import (AnalyzeRequest, AnalyzeResponse, DegradedResponse, ImportRequest,
                          ImportResponse, PortfolioIn, PortfolioOut, ProblemResponse,
                          ReportRequest, ReportResponse, UnavailableResponse, UniverseRow)
@@ -34,7 +36,28 @@ app = FastAPI(
                 "Educational — not financial advice.",
     version="1.0.0",
 )
+
+ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173").split(",")
+                   if o.strip()]
+limiter = limits.RateLimiter({"/report": 10, "/analyze": 10, "/import": 20}, default=60)
+gate = limits.ComputeGate(slots=2, wait_s=15.0)
+
+
+@app.middleware("http")
+async def _rate_limit(request: Request, call_next):
+    if request.method != "OPTIONS":
+        retry = limiter.check(limits.client_ip(request), request.url.path)
+        if retry is not None:
+            return JSONResponse(status_code=429, content={"detail": "too many requests"},
+                                headers={"Retry-After": str(max(1, math.ceil(retry)))})
+    return await call_next(request)
+
+
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+# Added last, so it runs outermost: even a 429 or 503 carries CORS headers and the browser
+# shows the real error instead of a CORS failure.
+app.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS, allow_methods=["GET", "POST"],
+                   allow_headers=["Content-Type"], allow_credentials=False)
 
 
 def _echo_text(text):
@@ -96,6 +119,15 @@ def _analyze_or_http_error(holdings, **kwargs):
         return analyze_portfolio(holdings, **kwargs)
 
 
+def _gated(fn, *args, **kwargs):
+    """Run a heavy computation in one of the compute gate's slots; a full gate is a 503."""
+    try:
+        with gate.slot():
+            return fn(*args, **kwargs)
+    except limits.Busy:
+        raise HTTPException(status_code=503, detail="busy", headers={"Retry-After": "10"})
+
+
 @app.post("/analyze", response_model=AnalyzeResponse, responses={
     422: {"model": ProblemResponse,
           "description": "The holdings were refused. Request-schema failures return `detail` "
@@ -103,10 +135,11 @@ def _analyze_or_http_error(holdings, **kwargs):
                          "`detail.problems`, one `{ticker, reason}` per ticker (a data-wide "
                          "problem is reported under the ticker `(factors)`)."},
     503: {"model": UnavailableResponse,
-          "description": "No market-data snapshot could be read."}})
+          "description": "No market-data snapshot could be read, or the server is busy (`detail: busy`, "
+                         "retry after the `Retry-After` seconds)."}})
 def analyze(req: AnalyzeRequest):
-    return _analyze_or_http_error(req.holdings, confidence=req.confidence,
-                                  include_backtest=req.include_backtest)
+    return _gated(_analyze_or_http_error, req.holdings, confidence=req.confidence,
+                  include_backtest=req.include_backtest)
 
 
 def _report_or_http_error(holdings, **kwargs):
@@ -118,11 +151,14 @@ def _report_or_http_error(holdings, **kwargs):
     422: {"model": ProblemResponse,
           "description": "The holdings were refused: `detail.problems` gives one "
                          "`{ticker, reason}` per ticker."},
-    503: {"model": UnavailableResponse, "description": "No market-data snapshot could be read."}})
+    503: {"model": UnavailableResponse,
+          "description": "No market-data snapshot could be read, or the server is busy (`detail: busy`, "
+                         "retry after the `Retry-After` seconds)."}})
 def report(req: ReportRequest):
     """Everything the dashboard shows for one portfolio, in one call: the 1-99 risk score
     beside the S&P 500's, the bad-year dollar range, and every detail section."""
-    return _report_or_http_error(req.holdings, confidence=req.confidence, shrinkage=req.shrinkage)
+    return _gated(_report_or_http_error, req.holdings, confidence=req.confidence,
+                  shrinkage=req.shrinkage)
 
 
 def _snapshot_or_http_error():

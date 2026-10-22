@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import numpy as np
 import pandas as pd
 import pytest
@@ -37,3 +38,12 @@ def normal_returns():
     """A long, well-behaved normal return series with known parameters."""
     rng = np.random.default_rng(0)
     return pd.Series(rng.normal(0.0, 0.01, 50_000))
+
+
+@pytest.fixture(autouse=True)
+def _fresh_rate_limits():
+    """API tests share one in-process limiter; start every test with a clean window."""
+    main = sys.modules.get("api.main")
+    if main is not None:
+        main.limiter.reset()
+    yield
