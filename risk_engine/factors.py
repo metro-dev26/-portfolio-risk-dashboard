@@ -3,7 +3,7 @@ Factors are stored as decimals (Mkt-RF, SMB, HML, RF are simple daily returns)."
 import numpy as np
 import pandas as pd
 
-from risk_engine.config import TRADING_DAYS
+from risk_engine.config import FACTOR_MIN_OBS, TRADING_DAYS
 from risk_engine.data import load_snapshot
 
 FACTOR_NAMES = ["Mkt-RF", "SMB", "HML"]
@@ -58,3 +58,10 @@ def variance_attribution(reg):
     out = {n: float(pf / total) for n, pf in zip(FACTOR_NAMES, per_factor)}
     out["Idiosyncratic"] = float(resid_var / total)
     return out
+
+
+def factor_gap_reason(factors, shared, window_days):
+    ends = f"ends {factors.index.max().date()}" if len(factors) else "is empty"
+    return (f"The Fama-French factor data {ends}, so only {shared} of this portfolio's "
+            f"{window_days} trading days have factors; at least {FACTOR_MIN_OBS} are needed "
+            f"to estimate factor exposure.")

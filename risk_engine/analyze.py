@@ -2,54 +2,25 @@
 the snapshot (bounded live lookups for anything outside it), choose the window
 the holdings share, run the engine, return a JSON-serializable dict.
 No UI, no transport."""
-import numpy as np
-
 from risk_engine import backtest, data, metrics, optimize, portfolio
 from risk_engine import factors as fac
-from risk_engine.config import (BACKTEST_MIN_OBS, BENCHMARK, FACTOR_MIN_OBS,
-                                LIVE_BUDGET_API_S, LIVE_MAX_API)
-
-
-class PortfolioError(ValueError):
-    """The portfolio can't be analysed as given; `problems` says why, per ticker."""
-
-    def __init__(self, problems):
-        super().__init__("; ".join(f"{p['ticker']}: {p['reason']}" for p in problems))
-        self.problems = problems
-
+from risk_engine.config import BACKTEST_MIN_OBS, FACTOR_MIN_OBS
+from risk_engine.inputs import PortfolioError, prepare
 
 FACTORS_PROBLEM = "(factors)"
 OPTIMIZER_PROBLEM = "(optimizer)"
 NO_IDENTIFIABLE_SECTOR = "None identifiable"
 
 
-def _factor_gap_reason(factors, shared, window_days):
-    ends = f"ends {factors.index.max().date()}" if len(factors) else "is empty"
-    return (f"The Fama-French factor data {ends}, so only {shared} of this portfolio's "
-            f"{window_days} trading days have factors; at least {FACTOR_MIN_OBS} are needed "
-            f"to estimate factor exposure.")
-
-
 def analyze_portfolio(holdings, *, confidence=0.95, include_backtest=True,
                       snapshot=None, live_fetch=None):
     snap = snapshot or data.load_snapshot()
-    res = portfolio.resolve_holdings(holdings, snap, live_fetch=live_fetch or data.fetch_live,
-                                     max_live=LIVE_MAX_API, budget_s=LIVE_BUDGET_API_S)
-    if res.rejected:
-        raise PortfolioError([{"ticker": r.ticker, "reason": r.reason} for r in res.rejected])
-    tickers = res.tickers
-    win = portfolio.portfolio_window(res.prices, tickers, benchmark=snap.prices[BENCHMARK])
-    if win.status == "too_short":
-        raise PortfolioError([{"ticker": win.limiting, "reason": win.message}])
-
-    lr = win.returns
+    inp = prepare(holdings, snap, live_fetch=live_fetch)
+    res, tickers, win, lr, pr, weights = inp.res, inp.tickers, inp.window, inp.lr, inp.pr, inp.weights
     shared = len(lr.index.intersection(snap.factors.index))
     if shared < FACTOR_MIN_OBS:
         raise PortfolioError([{"ticker": FACTORS_PROBLEM,
-                               "reason": _factor_gap_reason(snap.factors, shared, win.n_days)}])
-    amounts = np.array([res.holdings[t] for t in tickers], dtype=float)
-    weights = amounts / amounts.sum()
-    pr = metrics.portfolio_returns(lr, tickers, weights)
+                               "reason": fac.factor_gap_reason(snap.factors, shared, win.n_days)}])
 
     hist_var, hist_cvar = metrics.historical_var_cvar(pr, confidence)
     gauss_var, gauss_cvar = metrics.gaussian_var_cvar(pr, confidence)
