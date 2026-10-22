@@ -142,7 +142,7 @@ class PortfolioIn(BaseModel):
 
 
 class PortfolioOut(BaseModel):
-    id: int
+    id: str
     name: str
     holdings: dict[str, float]
     created_at: str

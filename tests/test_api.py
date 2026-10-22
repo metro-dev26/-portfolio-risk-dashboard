@@ -70,12 +70,17 @@ def test_portfolio_crud(tmp_path, monkeypatch):
     pid = created.json()["id"]
     got = client.get(f"/portfolios/{pid}")
     assert got.status_code == 200 and got.json()["name"] == "p1"
-    assert any(r["id"] == pid for r in client.get("/portfolios").json())
+    assert isinstance(pid, str) and len(pid) == 22
+    assert client.get("/portfolios").status_code == 405       # nobody can list everyone's portfolios
 
 
 def test_get_missing_portfolio_404(tmp_path, monkeypatch):
     monkeypatch.setenv("PORTFOLIO_DB", str(tmp_path / "api2.db"))
-    assert client.get("/portfolios/999").status_code == 404
+    assert client.get("/portfolios/AAAAAAAAAAAAAAAAAAAAAA").status_code == 404
+
+
+def test_portfolio_id_with_bad_characters_is_a_422():
+    assert client.get("/portfolios/not a token!").status_code == 422
 
 
 def _ok_live(monkeypatch, rows=None):

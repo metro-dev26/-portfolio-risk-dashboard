@@ -13,14 +13,15 @@ def test_save_get_roundtrip(tmp_path):
 def test_get_missing_returns_none(tmp_path):
     db = str(tmp_path / "t.db")
     store.save_portfolio("x", {"AAPL": 1, "MSFT": 1}, path=db)
-    assert store.get_portfolio(999, path=db) is None
+    assert store.get_portfolio("AAAAAAAAAAAAAAAAAAAAAA", path=db) is None
 
 
-def test_list_returns_all_in_order(tmp_path):
+def test_ids_are_random_tokens_not_a_sequence(tmp_path):
     db = str(tmp_path / "t.db")
-    store.save_portfolio("a", {"AAPL": 1, "MSFT": 1}, path=db)
-    store.save_portfolio("b", {"MSFT": 2, "JPM": 1}, path=db)
-    assert [r["name"] for r in store.list_portfolios(path=db)] == ["a", "b"]
+    a = store.save_portfolio("a", {"AAPL": 1.0}, path=db)
+    b = store.save_portfolio("b", {"AAPL": 1.0}, path=db)
+    assert isinstance(a, str) and len(a) == 22 and a != b
+    assert not hasattr(store, "list_portfolios")
 
 
 def test_env_var_fallback_used_when_path_omitted(tmp_path, monkeypatch):

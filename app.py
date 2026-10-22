@@ -220,8 +220,9 @@ if mode == "🔌 API":
         ("📊", "POST /analyze",
          "Send your holdings in dollars — get back VaR &amp; CVaR, Sharpe, max drawdown, "
          "Fama-French factor betas, VaR backtests, and an optimized max-Sharpe mix. One call, the whole engine."),
-        ("💾", "POST · GET /portfolios",
-         "Save a named portfolio and list your saved ones. <code>GET /portfolios/{id}</code> fetches a single one."),
+        ("💾", "POST /portfolios · GET /portfolios/{id}",
+         "Save a named portfolio and get back a private id. <code>GET /portfolios/{id}</code> "
+         "fetches it; ids are random, and there is no way to list other people's portfolios."),
         ("❤️", "GET /health",
          "A liveness check — returns <code>{\"status\":\"ok\"}</code> when the service is awake."),
     ]

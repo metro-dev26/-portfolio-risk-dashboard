@@ -8,7 +8,7 @@ import os
 import re
 from contextlib import contextmanager
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Path, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -228,13 +228,8 @@ def create_portfolio(p: PortfolioIn):
     return store.get_portfolio(pid)
 
 
-@app.get("/portfolios", response_model=list[PortfolioOut])
-def get_portfolios():
-    return store.list_portfolios()
-
-
 @app.get("/portfolios/{pid}")
-def get_portfolio(pid: int, analyze: bool = Query(False)):
+def get_portfolio(pid: str = Path(pattern=r"^[A-Za-z0-9_-]{1,64}$"), analyze: bool = Query(False)):
     row = store.get_portfolio(pid)
     if row is None:
         raise HTTPException(status_code=404, detail="portfolio not found")
