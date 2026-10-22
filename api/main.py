@@ -40,13 +40,24 @@ app = FastAPI(
 ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173").split(",")
                    if o.strip()]
 limiter = limits.RateLimiter({"/report": 10, "/analyze": 10, "/import": 20}, default=60)
-gate = limits.ComputeGate(slots=2, wait_s=15.0)
+gate = limits.ComputeGate(slots=2, wait_s=15.0, max_waiting=8)
+_TRUE_SPELLINGS = {"1", "true", "t", "yes", "y", "on"}    # what a bool query parameter accepts
+
+
+def _rate_limit_path(request: Request):
+    """The path whose allowance a request spends. Reading a saved portfolio with
+    analyze=true runs a full analysis, so it spends /analyze's allowance, not the general one."""
+    path = request.url.path
+    if path.startswith("/portfolios/") and any(
+            v.strip().lower() in _TRUE_SPELLINGS for v in request.query_params.getlist("analyze")):
+        return "/analyze"
+    return path
 
 
 @app.middleware("http")
 async def _rate_limit(request: Request, call_next):
     if request.method != "OPTIONS":
-        retry = limiter.check(limits.client_ip(request), request.url.path)
+        retry = limiter.check(limits.client_ip(request), _rate_limit_path(request))
         if retry is not None:
             return JSONResponse(status_code=429, content={"detail": "too many requests"},
                                 headers={"Retry-After": str(max(1, math.ceil(retry)))})
@@ -57,7 +68,8 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 # Added last, so it runs outermost: even a 429 or 503 carries CORS headers and the browser
 # shows the real error instead of a CORS failure.
 app.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS, allow_methods=["GET", "POST"],
-                   allow_headers=["Content-Type"], allow_credentials=False)
+                   allow_headers=["Content-Type"], expose_headers=["Retry-After"],
+                   allow_credentials=False)
 
 
 def _echo_text(text):
@@ -227,5 +239,5 @@ def get_portfolio(pid: int, analyze: bool = Query(False)):
     if row is None:
         raise HTTPException(status_code=404, detail="portfolio not found")
     if analyze:
-        row["analysis"] = _analyze_or_http_error(row["holdings"])
+        row["analysis"] = _gated(_analyze_or_http_error, row["holdings"])
     return row

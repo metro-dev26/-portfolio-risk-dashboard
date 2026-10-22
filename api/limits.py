@@ -8,7 +8,7 @@ from contextlib import contextmanager
 
 
 class Busy(Exception):
-    """Every compute slot stayed taken for the whole wait."""
+    """No compute slot was free, and none freed up in time (or too many were already waiting)."""
 
 
 class RateLimiter:
@@ -48,12 +48,32 @@ class RateLimiter:
 
 
 class ComputeGate:
-    def __init__(self, slots=2, wait_s=15.0):
-        self._sem, self._wait = threading.BoundedSemaphore(slots), wait_s
+    """`slots` computations at once. A request that finds them all taken waits up to `wait_s`,
+    but only if fewer than `max_waiting` others are already waiting (None: no cap). Each
+    waiter ties up a server worker thread, so an uncapped queue could starve the cheap routes."""
+
+    def __init__(self, slots=2, wait_s=15.0, max_waiting=None):
+        self._sem = threading.BoundedSemaphore(slots)
+        self._wait, self._max_waiting = wait_s, max_waiting
+        self._lock = threading.Lock()
+        self._waiting = 0
+
+    def _acquire(self):
+        if self._sem.acquire(blocking=False):
+            return True
+        with self._lock:
+            if self._max_waiting is not None and self._waiting >= self._max_waiting:
+                return False
+            self._waiting += 1
+        try:
+            return self._sem.acquire(timeout=self._wait)
+        finally:
+            with self._lock:
+                self._waiting -= 1
 
     @contextmanager
     def slot(self):
-        if not self._sem.acquire(timeout=self._wait):
+        if not self._acquire():
             raise Busy()
         try:
             yield
