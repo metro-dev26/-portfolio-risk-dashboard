@@ -212,7 +212,7 @@ def test_import_text_at_the_limit_is_accepted():
     "Symbol,Value\nAAPL,\x00\x00\n",
     'Symbol,Value\nAAPL,"unterminated\n',
     "Symbol,Quantity\nAAPL," + "9" * 5_000 + "\n",
-    "﻿﻿",
+    "\ufeff\ufeff",
 ], ids=["field-over-csv-limit", "nul-bytes", "open-quote", "overflowing-quantity", "bom-only"])
 def test_import_hostile_csv_is_a_200_with_notes_never_a_500(text):
     r = TestClient(app, raise_server_exceptions=False).post("/import", json={"format": "csv", "text": text})
@@ -257,3 +257,46 @@ def test_import_csv_looks_a_repeated_symbol_up_once(monkeypatch):
     body = client.post("/import", json={"format": "csv", "text": text}).json()
     assert body["holdings"]["AAPL"] == pytest.approx(500 * close)
     assert _CountingPrices.column_reads == 1
+
+
+@pytest.mark.parametrize("path, body", [
+    ("/import", rb'{"format": "paste", "text": "\ud800 10"}'),
+    ("/import", rb'{"format": "csv", "text": "Symbol,Value\n\ud800,10\n"}'),
+    ("/import", rb'{"format": "paste", "text": "AAPL \ud800"}'),
+    ("/import", rb'{"format": "x\ud800", "text": "a"}'),
+    ("/report", rb'{"holdings": {"\ud800": 100}}'),
+], ids=["paste-ticker", "csv-ticker", "paste-amount", "format-echo", "report-holdings-key"])
+def test_a_lone_surrogate_is_a_422_never_a_500(path, body):
+    r = TestClient(app, raise_server_exceptions=False).post(
+        path, content=body, headers={"Content-Type": "application/json"})
+    assert r.status_code == 422, r.text[:200]
+    assert "\N{REPLACEMENT CHARACTER}" in r.content.decode("utf-8")
+
+
+def test_a_422_does_not_echo_an_oversized_input_back():
+    r = client.post("/import", json={"format": "csv", "text": "x" * 300_000})
+    assert r.status_code == 422
+    assert len(r.content) < 2_000
+    echoed = r.json()["detail"][0]["input"]
+    assert len(echoed) == 200 and echoed.endswith("…")
+
+
+def test_a_422_truncates_an_oversized_ticker_in_the_message_and_the_echo():
+    r = client.post("/report", json={"holdings": {"A" * 300_000: 100}})
+    assert r.status_code == 422
+    assert len(r.content) < 2_000
+
+
+def test_import_caps_the_notes_it_returns():
+    r = client.post("/import", json={"format": "paste", "text": "x\n" * 100_000})
+    notes = r.json()["notes"]
+    assert len(notes) == 51
+    assert notes[0].startswith("line 1:") and notes[49].startswith("line 50:")
+    assert notes[50] == "…and 99950 more lines were skipped"
+    assert len(r.content) < 10_000
+
+
+def test_import_returns_exactly_fifty_notes_uncapped():
+    r = client.post("/import", json={"format": "paste", "text": "x\n" * 50})
+    notes = r.json()["notes"]
+    assert len(notes) == 50 and not any("more lines" in n for n in notes)

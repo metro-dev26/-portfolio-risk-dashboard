@@ -4,6 +4,7 @@ Swagger UI at /docs is the point. Educational tool, not financial advice."""
 import functools
 import logging
 import math
+import re
 from contextlib import contextmanager
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -23,6 +24,10 @@ from risk_engine.report import build_report
 
 log = logging.getLogger(__name__)
 
+_MAX_ECHO_CHARS = 200
+_LONE_SURROGATE = re.compile(r"[\ud800-\udfff]")
+_MAX_IMPORT_NOTES = 50
+
 app = FastAPI(
     title="MarketPlug Risk API",
     description="Documented REST service over a tested portfolio-risk engine. "
@@ -32,15 +37,24 @@ app = FastAPI(
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
+def _echo_text(text):
+    text = _LONE_SURROGATE.sub("\ufffd", text)
+    return text if len(text) <= _MAX_ECHO_CHARS else text[:_MAX_ECHO_CHARS - 1] + "…"
+
+
 def _json_safe(obj):
-    """Replace non-finite floats (inf/-inf/NaN) with their string form. A 422
-    error echoes the offending input back; when that input is inf/NaN, Starlette's
-    JSON encoder (allow_nan=False) raises and the clean 422 becomes a 500. Scrub
-    the whole error payload so validation failures always serialize."""
+    """Make a 422 payload serializable and small. It echoes the offending input back,
+    and three kinds of input turn the clean 422 into a 500 or an outsized response:
+    inf/NaN (Starlette's JSON encoder has allow_nan=False) become their string form, a
+    lone UTF-16 surrogate (not encodable as UTF-8) becomes U+FFFD, and any string over
+    _MAX_ECHO_CHARS is cut short. Scrub the whole payload, keys included, so validation
+    failures always serialize."""
+    if isinstance(obj, str):
+        return _echo_text(obj)
     if isinstance(obj, float):
         return obj if math.isfinite(obj) else str(obj)
     if isinstance(obj, dict):
-        return {k: _json_safe(v) for k, v in obj.items()}
+        return {_json_safe(k): _json_safe(v) for k, v in obj.items()}
     if isinstance(obj, list):
         return [_json_safe(v) for v in obj]
     return obj
@@ -128,10 +142,19 @@ def universe():
             if t in snap.prices.columns and t not in snap.quarantined]
 
 
+def _capped_notes(notes):
+    """A 200 KB paste of junk is 100,000 skipped lines. Keep the first _MAX_IMPORT_NOTES and
+    say how many more there were."""
+    if len(notes) <= _MAX_IMPORT_NOTES:
+        return notes
+    more = len(notes) - _MAX_IMPORT_NOTES
+    return notes[:_MAX_IMPORT_NOTES] + [f"…and {more} more lines were skipped"]
+
+
 @app.post("/import", response_model=ImportResponse, responses={
     503: {"model": UnavailableResponse,
-          "description": "A CSV of share counts needs the dataset's closing prices and none "
-                         "could be read. Pasted text never needs them."}})
+          "description": "No market-data snapshot could be read. Every CSV import needs one, "
+                         "to price share counts; pasted text does not."}})
 def import_holdings(req: ImportRequest):
     """Parse a broker CSV export or pasted 'TICKER AMOUNT' lines into holdings. Share
     counts are valued at the dataset's latest close; nothing is analysed here."""
@@ -148,7 +171,7 @@ def import_holdings(req: ImportRequest):
             return float(closes.iloc[-1]) if len(closes) else None
 
         parsed = importer.parse_csv(req.text, last_price=last_price)
-    return {"holdings": parsed.holdings, "notes": parsed.notes}
+    return {"holdings": parsed.holdings, "notes": _capped_notes(parsed.notes)}
 
 
 @app.post("/portfolios", response_model=PortfolioOut)
