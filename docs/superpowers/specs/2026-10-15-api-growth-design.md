@@ -76,8 +76,8 @@ It is linear on purpose. Tam has to be able to explain it in one sentence: "scor
 - The score rises when L rises (monotonic).
 - An all-SPY portfolio scores the same as the benchmark score.
 - A single high-volatility stock (TSLA) scores above SPY.
-- Intermediate Treasuries (IEF) score below SPY. Long-duration Treasuries do not: the score includes drift, and on the 2018–2026 data TLT scores about 40 against SPY's 30, while a TLT/IEF 50/50 mix ties SPY.
-- The mixed 30/20/40/10 portfolio (AAPL, JPM, TLT, IEF) still scores below SPY.
+- Intermediate Treasuries (IEF) score below SPY. Long-duration Treasuries do not: the score includes drift. Measured 2026-10-23 as bare return series on one common window (2,126 daily returns, prices 2018-01-02 to 2026-06-18) with the full 10,000 paths and the same draws: SPY 28, TLT 40, IEF 17, TLT/IEF 50/50 29. So the 50/50 mix lands within a point of SPY. These match the report-level numbers because the report uses the same window.
+- The mixed 30/20/40/10 portfolio (AAPL, JPM, TLT, IEF) still scores below SPY: 20 against 28.
 - The score is bounded to 1..99.
 
 ## 3. Architecture
@@ -190,10 +190,10 @@ Built once per request. Every section reads from it.
 - Tickers outside the universe still work through the existing live lookup.
 
 **`POST /import`** — new.
-- Request: `{format: "csv" | "paste", text}`, with `text` at most 200 KB.
+- Request: `{format: "csv" | "paste", text}`, with `text` at most 200,000 characters.
 - Response: `{holdings, notes}` from the existing `importer.parse_csv` / `parse_paste`, with last prices from the snapshot.
 - It parses only and never analyses.
-- It returns at most 50 notes, plus one "…and N more" summary note, so a 200 KB paste of junk can't come back as 100,000 notes.
+- It returns at most 50 notes, plus one summary note, "…and N more lines were skipped", so a 200,000-character paste of junk can't come back as 100,000 notes.
 
 **`/portfolios` — security fix.** This is live today and **has a privacy hole**:
 - `GET /portfolios` lists every saved portfolio from every user.
