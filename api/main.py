@@ -3,6 +3,7 @@
 Swagger UI at /docs is the point. Educational tool, not financial advice."""
 import logging
 import math
+from contextlib import contextmanager
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
@@ -63,13 +64,21 @@ def health():
             "data_source": snap.source}
 
 
-def _analyze_or_http_error(holdings, **kwargs):
+@contextmanager
+def _engine_refusals_as_http_errors():
+    """The one mapping from the engine's refusals to HTTP: holdings it can't use are a 422
+    with one problem per ticker, and no readable snapshot is a 503."""
     try:
-        return analyze_portfolio(holdings, **kwargs)
+        yield
     except PortfolioError as e:
         raise HTTPException(status_code=422, detail={"problems": e.problems})
     except data.SnapshotUnavailable as e:
         raise HTTPException(status_code=503, detail=f"market data is unavailable: {e}")
+
+
+def _analyze_or_http_error(holdings, **kwargs):
+    with _engine_refusals_as_http_errors():
+        return analyze_portfolio(holdings, **kwargs)
 
 
 @app.post("/analyze", response_model=AnalyzeResponse, responses={
@@ -86,12 +95,8 @@ def analyze(req: AnalyzeRequest):
 
 
 def _report_or_http_error(holdings, **kwargs):
-    try:
+    with _engine_refusals_as_http_errors():
         return build_report(holdings, **kwargs)
-    except PortfolioError as e:
-        raise HTTPException(status_code=422, detail={"problems": e.problems})
-    except data.SnapshotUnavailable as e:
-        raise HTTPException(status_code=503, detail=f"market data is unavailable: {e}")
 
 
 @app.post("/report", response_model=ReportResponse, responses={

@@ -11,6 +11,8 @@ from risk_engine.report import build_report
 
 client = TestClient(app)
 BODY = {"holdings": {"AAPL": 30000, "JPM": 20000, "TLT": 40000, "IEF": 10000}}
+BONDS_ONLY = {"TLT": 50000, "IEF": 30000, "AGG": 20000}
+EVEN_SPLIT = {"AAPL": 50000, "MSFT": 50000}
 
 
 @pytest.fixture(scope="module")
@@ -51,6 +53,16 @@ def test_reallocation_rows_carry_the_asset_class(resp):
     rows = resp.json()["optimizer"]["reallocation"]
     assert {r["ticker"]: r["asset_class"] for r in rows} == {
         "AAPL": "Equity", "JPM": "Equity", "TLT": "Bond", "IEF": "Bond"}
+
+
+def test_stress_dollars_are_a_signed_change_not_a_loss_magnitude(resp):
+    body = resp.json()
+    value = body["portfolio"]["value"]
+    ok = [c for c in body["stress"] if c["status"] == "ok"]
+    assert ok and all(c["change_dollars"] == pytest.approx(c["total"] * value) for c in ok)
+    assert any(c["change_dollars"] < 0 for c in ok)       # a crash shows as a negative number
+    assert body["score"]["portfolio"]["loss_dollars"] >= 0    # the score's loss is a magnitude
+    assert all("loss_dollars" not in c for c in body["stress"])
 
 
 def test_flat_priced_holding_serves_a_null_correlation_cell(monkeypatch):
@@ -102,6 +114,18 @@ def test_response_models_keep_every_key_the_report_builds(variant):
     # the models mirror the report dict. Round-tripping it can.
     snap = data.load_snapshot(use_memo=False)
     rep = build_report(BODY["holdings"], snapshot=variant(snap) if variant else snap)
+    assert ReportResponse.model_validate(rep).model_dump() == rep
+
+
+def test_response_models_keep_every_key_with_no_top_sector():
+    rep = build_report(BONDS_ONLY)
+    assert rep["optimizer"]["sector_mix"]["top_sector"] is None
+    assert ReportResponse.model_validate(rep).model_dump() == rep
+
+
+def test_response_models_keep_every_key_with_no_diversifier():
+    rep = build_report(EVEN_SPLIT)
+    assert rep["risk_contribution"]["diversifier"] is None
     assert ReportResponse.model_validate(rep).model_dump() == rep
 
 

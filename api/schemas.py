@@ -242,7 +242,8 @@ class CrisisOut(BaseModel):
     total: Optional[float]
     worst_day: Optional[float]
     max_dd: Optional[float]
-    loss_dollars: Optional[float]
+    change_dollars: Optional[float] = Field(
+        description="signed dollar change over the crisis; negative is a loss")
     path: Optional[Series]
 
 

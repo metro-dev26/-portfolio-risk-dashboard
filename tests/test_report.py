@@ -47,7 +47,8 @@ def test_every_crisis_is_present_with_a_status(rep):
     from risk_engine.config import CRISES
     assert [c["label"] for c in rep["stress"]] == [c[0] for c in CRISES]
     ok = [c for c in rep["stress"] if c["status"] == "ok"]
-    assert ok and all(c["loss_dollars"] == pytest.approx(c["total"] * rep["portfolio"]["value"]) for c in ok)
+    assert ok and all(c["change_dollars"] == pytest.approx(c["total"] * rep["portfolio"]["value"]) for c in ok)
+    assert all("loss_dollars" not in c for c in rep["stress"])    # that name is the score's, and unsigned
     assert all(c["path"]["values"][0] == 0.0 for c in ok)     # return from start
 
 

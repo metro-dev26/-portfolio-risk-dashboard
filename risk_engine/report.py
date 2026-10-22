@@ -82,7 +82,7 @@ def _stress(inp):
         out.append({"label": r.label, "context": r.context, "start": r.start, "end": r.end,
                     "status": r.status, "missing": r.missing, "total": r.total,
                     "worst_day": r.worst_day, "max_dd": r.max_dd,
-                    "loss_dollars": r.total * inp.value if ok else None,
+                    "change_dollars": r.total * inp.value if ok else None,
                     "path": _series(r.path / r.path.iloc[0] - 1.0) if ok else None})
     return out
 
