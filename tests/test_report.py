@@ -111,3 +111,29 @@ def test_misaligned_benchmark_dates_are_refused_before_the_shared_draws():
     skewed = dataclasses.replace(inp, spy_r=inp.spy_r.iloc[1:])
     with pytest.raises(ValueError, match="same dates"):
         report_from_inputs(skewed)
+
+
+def test_flat_priced_holding_gives_none_not_nan_in_the_correlation_matrix():
+    snap = data.load_snapshot(use_memo=False)
+    flat = dataclasses.replace(snap, prices=snap.prices.assign(JPM=100.0))
+    rep = build_report(H, snapshot=flat)
+    json.dumps(rep, allow_nan=False)
+    corr = rep["correlation"]
+    i = corr["tickers"].index("JPM")
+    others = [j for j in range(len(corr["tickers"])) if j != i]
+    assert all(corr["matrix"][i][j] is None and corr["matrix"][j][i] is None for j in others)
+    k = corr["tickers"].index("AAPL")
+    assert corr["matrix"][k][k] == 1.0       # the other holdings keep real numbers
+
+
+def test_reallocation_rows_name_the_asset_class_not_the_instrument_type(rep):
+    rows = rep["optimizer"]["reallocation"]
+    assert {r["ticker"]: r["asset_class"] for r in rows} == {
+        "AAPL": "Equity", "JPM": "Equity", "TLT": "Bond", "IEF": "Bond"}
+    assert all("type" not in r for r in rows)
+
+
+def test_stress_paths_start_at_exactly_zero_when_weights_sum_off_by_a_rounding_error():
+    rep = build_report({"AAPL": 45400, "JPM": 43800, "TLT": 8100, "IEF": 25600})
+    ok = [c for c in rep["stress"] if c["status"] == "ok"]
+    assert ok and all(c["path"]["values"][0] == 0.0 for c in ok)

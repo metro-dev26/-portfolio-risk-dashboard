@@ -4,6 +4,8 @@ The API serves this dict; the Streamlit page lays it out. Both read the same
 numbers, so the two frontends can never disagree. A section that can't be
 computed (thin factor data, an optimizer that won't converge) comes back with
 `available: false` and a reason instead of failing the whole report."""
+import math
+
 import numpy as np
 
 from risk_engine import backtest, benchmark, data, metrics, optimize, simulate, stress
@@ -44,6 +46,11 @@ def _series(s):
             "values": [_sig(v) for v in s.to_numpy()]}
 
 
+def _corr_cell(x):
+    """A holding with no price movement has no correlation: None, since JSON has no NaN."""
+    return round(x, 3) if math.isfinite(x) else None
+
+
 def _score(sc):
     return {"score": sc.score, "bad_year_loss": sc.bad_year_loss,
             "loss_dollars": sc.loss_dollars, "gain_dollars": sc.gain_dollars}
@@ -76,7 +83,7 @@ def _stress(inp):
                     "status": r.status, "missing": r.missing, "total": r.total,
                     "worst_day": r.worst_day, "max_dd": r.max_dd,
                     "loss_dollars": r.total * inp.value if ok else None,
-                    "path": _series(r.path - 1.0) if ok else None})
+                    "path": _series(r.path / r.path.iloc[0] - 1.0) if ok else None})
     return out
 
 
@@ -151,7 +158,7 @@ def _optimizer(inp, shrinkage):
     return {**base, "available": True, "reason": "", "current": point(w),
             "max_sharpe": point(w_ms), "min_variance": point(w_mv),
             "frontier": [{"vol": a / 100, "ret": b / 100} for a, b in zip(fr_v, fr_r)],
-            "reallocation": [{"ticker": k, "type": inp.res.meta[k]["asset_class"],
+            "reallocation": [{"ticker": k, "asset_class": inp.res.meta[k]["asset_class"],
                               "sector": inp.res.meta[k]["sector"], "current": float(a * v),
                               "suggested": float(b * v), "delta_dollars": float((b - a) * v)}
                              for k, a, b in zip(t, w, w_ms)],
@@ -197,7 +204,7 @@ def report_from_inputs(inp, *, confidence=0.95, shrinkage=False):
         "drawdown": _series(metrics.drawdown_series(inp.pr)),
         "stress": _stress(inp),
         "correlation": {"tickers": corr["tickers"],
-                        "matrix": [[round(x, 3) for x in row] for row in corr["matrix"]]},
+                        "matrix": [[_corr_cell(x) for x in row] for row in corr["matrix"]]},
         "backtest": _backtest(inp, confidence),
         "risk_contribution": _risk_contribution(inp),
         "factors": _factors(inp),
