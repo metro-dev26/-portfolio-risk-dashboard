@@ -1,9 +1,11 @@
 import dataclasses
 import json
+import types
 
+import numpy as np
 import pytest
 
-from risk_engine import data
+from risk_engine import data, optimize
 from risk_engine.analyze import PortfolioError, analyze_portfolio
 
 HOLDINGS = {"AAPL": 20000, "MSFT": 20000, "JPM": 20000, "XOM": 20000, "TLT": 20000}
@@ -37,6 +39,16 @@ def test_empty_factor_data_is_refused_with_a_reason():
         analyze_portfolio(HOLDINGS, snapshot=bare)
     assert e.value.problems[0]["ticker"] == "(factors)"
     assert "is empty" in e.value.problems[0]["reason"]
+
+
+def test_an_optimizer_that_does_not_converge_is_refused_with_a_reason(monkeypatch):
+    fake = types.SimpleNamespace(success=False, message="Iteration limit reached",
+                                 x=np.full(len(HOLDINGS), 1 / len(HOLDINGS)))
+    monkeypatch.setattr(optimize, "minimize", lambda *a, **k: fake)
+    with pytest.raises(PortfolioError) as e:
+        analyze_portfolio(HOLDINGS)
+    assert e.value.problems[0]["ticker"] == "(optimizer)"
+    assert "Iteration limit reached" in e.value.problems[0]["reason"]
 
 
 def _with_sectors(**sectors):
