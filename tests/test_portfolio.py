@@ -370,3 +370,31 @@ def test_malformed_tickers_are_rejected_without_using_a_live_lookup():
     assert calls == unknown and r.tickers == ["AAPL"] + unknown
     assert [(x.ticker, x.reason) for x in r.rejected] == [
         ("", "not a valid ticker symbol"), ("A/B", "not a valid ticker symbol")]
+
+
+@pytest.mark.parametrize("status,retryable", [("unavailable", True), ("not_found", False),
+                                              ("invalid", False), ("non_usd", False)])
+def test_a_rejection_says_whether_trying_again_could_change_it(status, retryable):
+    r = portfolio.resolve_holdings(
+        {"AAPL": 1, "ZZ1": 1}, snap(),
+        live_fetch=lambda sym: data.LiveResult(sym, status, "why"))
+    assert r.rejected[0].retryable is retryable
+
+
+def test_running_out_of_lookup_time_can_be_retried_but_hitting_the_cap_cannot():
+    s = snap()
+    base = s.prices["AAPL"].dropna()
+    ticks = iter([0.0, 0.0, 11.0, 11.0, 11.0])
+    slow = portfolio.resolve_holdings({"ZZ1": 1, "ZZ2": 1}, s, live_fetch=ok_live(base),
+                                      budget_s=10.0, clock=lambda: next(ticks))
+    assert [x.retryable for x in slow.rejected] == [True]
+    capped = portfolio.resolve_holdings({f"ZZ{i}": 100.0 for i in range(7)}, s,
+                                        live_fetch=ok_live(base), max_live=5)
+    assert capped.rejected and not any(x.retryable for x in capped.rejected)
+
+
+def test_a_duplicated_ticker_keeps_its_rejection_retryable():
+    r = portfolio.resolve_holdings(
+        {"ZZ1": 1, "zz1": 2}, snap(),
+        live_fetch=lambda sym: data.LiveResult(sym, "unavailable", "down"))
+    assert [(x.ticker, x.amount, x.retryable) for x in r.rejected] == [("ZZ1", 3, True)]

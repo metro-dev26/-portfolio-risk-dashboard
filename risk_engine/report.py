@@ -41,9 +41,15 @@ def _sig(x, digits=6):
     return float(f"{float(x):.{digits}g}")
 
 
-def _series(s):
+def _cents(x):
+    """A dollar amount to the cent. Significant digits would round a $2M portfolio to $10."""
+    return round(float(x), 2)
+
+
+def _series(s, dollars=False):
+    """Dated values: dollars to the cent, anything else (returns, drawdowns) to 6 digits."""
     return {"dates": [d.strftime("%Y-%m-%d") for d in s.index],
-            "values": [_sig(v) for v in s.to_numpy()]}
+            "values": [(_cents if dollars else _sig)(v) for v in s.to_numpy()]}
 
 
 def _corr_cell(x):
@@ -170,7 +176,7 @@ def _monte_carlo(sim):
     by_days = {d: label for label, d in simulate.HORIZONS.items()}
     return {"n_sims": simulate.N_SIMS, "seed": simulate.SEED, "value": sim.value,
             "band_days": sim.band_days,
-            "bands": {f"p{p}": [_sig(x) for x in vals] for p, vals in sim.bands.items()},
+            "bands": {f"p{p}": [_cents(x) for x in vals] for p, vals in sim.bands.items()},
             "horizons": [{"label": by_days[d], "days": d, **h} for d, h in sim.horizons.items()]}
 
 
@@ -197,8 +203,8 @@ def report_from_inputs(inp, *, confidence=0.95, shrinkage=False):
                     "max_drawdown": metrics.max_drawdown(inp.pr),
                     "trading_days": int(len(inp.pr))},
         "benchmark": {"rows": cmp_.rows, "beta": cmp_.beta,
-                      "growth": {"portfolio": _series(cmp_.growth_portfolio),
-                                 "benchmark": _series(cmp_.growth_benchmark)}},
+                      "growth": {"portfolio": _series(cmp_.growth_portfolio, dollars=True),
+                                 "benchmark": _series(cmp_.growth_benchmark, dollars=True)}},
         "distribution": {**metrics.return_histogram(inp.pr), "mean": float(inp.pr.mean()),
                          "std": float(inp.pr.std())},
         "drawdown": _series(metrics.drawdown_series(inp.pr)),

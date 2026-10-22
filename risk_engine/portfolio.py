@@ -22,6 +22,7 @@ class Rejection:
     ticker: str
     amount: float
     reason: str
+    retryable: bool = False   # a lookup that failed for now, or ran out of time: trying again may help
 
 
 @dataclass
@@ -60,7 +61,7 @@ def resolve_holdings(holdings, snap, *, live_fetch=None, max_live=LIVE_MAX_API,
             continue
         if t in rejected:
             prior = rejected[t]
-            rejected[t] = Rejection(t, prior.amount + amount, prior.reason)
+            rejected[t] = Rejection(t, prior.amount + amount, prior.reason, prior.retryable)
             continue
         if t in snap.quarantined:
             rejected[t] = Rejection(t, amount,
@@ -81,12 +82,12 @@ def resolve_holdings(holdings, snap, *, live_fetch=None, max_live=LIVE_MAX_API,
                                     f"too many tickers outside the dataset (max {max_live})")
             continue
         if clock() - started > budget_s:
-            rejected[t] = Rejection(t, amount, "lookup time budget used up — try again")
+            rejected[t] = Rejection(t, amount, "lookup time budget used up — try again", True)
             continue
         n_live += 1
         res = live_fetch(t)
         if res.status != "ok":
-            rejected[t] = Rejection(t, amount, res.reason)
+            rejected[t] = Rejection(t, amount, res.reason, res.status == "unavailable")
             continue
         if not _has_prices(res.prices):
             rejected[t] = Rejection(t, amount, "no price history on Yahoo Finance")

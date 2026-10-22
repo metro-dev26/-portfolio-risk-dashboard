@@ -4,7 +4,7 @@ import json
 import numpy as np
 import pytest
 
-from risk_engine import data, optimize
+from risk_engine import benchmark, data, optimize
 from risk_engine.inputs import prepare
 from risk_engine.report import build_report, report_from_inputs
 
@@ -138,3 +138,19 @@ def test_stress_paths_start_at_exactly_zero_when_weights_sum_off_by_a_rounding_e
     rep = build_report({"AAPL": 45400, "JPM": 43800, "TLT": 8100, "IEF": 25600})
     ok = [c for c in rep["stress"] if c["status"] == "ok"]
     assert ok and all(c["path"]["values"][0] == 0.0 for c in ok)
+
+
+HALF_A_CENT = 0.0051      # half a cent, plus the 0.0005 gap between adjacent doubles at $1e12
+
+
+def test_dollar_series_stay_exact_to_the_cent_at_a_trillion_dollars():
+    holdings = {"AAPL": 600_000_000_000, "TLT": 400_000_000_000}
+    rep = build_report(holdings)
+    inp = prepare(holdings, data.load_snapshot())
+    exact = benchmark.compare(inp.pr, inp.spy_r, inp.value)
+    for shown, truth in ((rep["benchmark"]["growth"]["portfolio"], exact.growth_portfolio),
+                         (rep["benchmark"]["growth"]["benchmark"], exact.growth_benchmark)):
+        assert shown["values"] == pytest.approx(truth.to_numpy(), rel=0, abs=HALF_A_CENT)
+    mc = rep["monte_carlo"]
+    year = next(h for h in mc["horizons"] if h["days"] == 252)
+    assert mc["bands"]["p50"][mc["band_days"].index(252)] == pytest.approx(year["p50"], rel=0, abs=HALF_A_CENT)

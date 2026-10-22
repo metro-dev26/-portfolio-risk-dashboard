@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import streamlit as st
+from streamlit.runtime.caching import cache_utils
 from streamlit.testing.v1 import AppTest
 
 from risk_engine import config, data, importer, inputs, metrics
@@ -172,13 +173,12 @@ def test_crisis_a_holding_missed_is_named_not_dropped(monkeypatch):
     assert "COVID-19 Crash" in notes and "NEWCO" in notes
 
 
-def test_thin_factor_overlap_gives_a_message_not_numbers(tmp_path, monkeypatch):
+def test_thin_factor_overlap_gives_a_message_not_numbers(tmp_path, monkeypatch, fresh_cache):
     bundle = tmp_path / "snapshot"
     shutil.copytree(Path(__file__).parent / "fixtures" / "snapshot", bundle)
     factors = pd.read_csv(bundle / "factors.csv", index_col=0, parse_dates=True)
     factors.loc[:"2018-02-28"].to_csv(bundle / "factors.csv")
     monkeypatch.setenv("MARKETPLUG_DATA_DIR", str(bundle))
-    st.cache_data.clear()
     at = AppTest.from_file(APP, default_timeout=60).run()
     assert not at.exception
     body = _body(at)
@@ -194,7 +194,7 @@ def _card(at, label):
     return next(str(m.value) for m in at.markdown if f"big-stat-label'>{label}</div>" in str(m.value))
 
 
-def test_var_cards_show_dollars_from_the_return_not_the_return_times_the_value():
+def test_var_cards_show_dollars_from_the_return_not_the_return_times_the_value(fresh_cache):
     inp = inputs.prepare(EXAMPLE_HOLDINGS, data.load_snapshot())
     var, cvar = metrics.historical_var_cvar(inp.pr, 0.95)
     at = AppTest.from_file(APP, default_timeout=60).run()
@@ -246,6 +246,13 @@ def _heatmap(at):
     raise AssertionError("no correlation heatmap on the page")
 
 
+def _numbers(array):
+    """A plotly array as floats: plotly 6 sends {dtype, bdata}, older versions a plain list."""
+    if isinstance(array, dict):
+        return np.frombuffer(base64.b64decode(array["bdata"]), dtype=array["dtype"])
+    return np.array(array, dtype=float)
+
+
 def test_a_holding_that_never_moves_leaves_blank_correlation_cells(monkeypatch, fresh_cache):
     def flat(sym):
         res = _fake_live()(sym)
@@ -255,10 +262,47 @@ def test_a_holding_that_never_moves_leaves_blank_correlation_cells(monkeypatch, 
     at = _paste(AppTest.from_file(APP, default_timeout=60).run(), "AAPL 10000\nMSFT 5000\nFLAT 5000")
     assert not at.exception
     trace = _heatmap(at)
-    z = np.frombuffer(base64.b64decode(trace["z"]["bdata"]), dtype=trace["z"]["dtype"])
-    z = z.reshape(len(trace["x"]), -1)
+    z = _numbers(trace["z"]).reshape(len(trace["x"]), -1)
     assert np.isnan(z[2]).all() and np.isnan(z[:, 2]).all()
     assert z[0][0] == 1.0 and -1 < z[0][1] < 1
+
+
+class _Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+def test_a_lookup_that_failed_once_is_tried_again_once_the_retry_window_has_passed(
+        monkeypatch, fresh_cache):
+    clock = _Clock()
+    monkeypatch.setattr(cache_utils, "TTLCACHE_TIMER", clock)
+    live = _fake_live()
+    calls = []
+
+    def flaky(sym):
+        calls.append(sym)
+        if len(calls) == 1:
+            return data.LiveResult(sym, "unavailable", "data source unavailable (URLError)")
+        return live(sym)
+
+    monkeypatch.setattr(data, "fetch_live", flaky)
+    at = _paste(AppTest.from_file(APP, default_timeout=60).run(), "AAPL 10000\nMSFT 5000\nFLAKY 3000")
+    assert "FLAKY" in _sidebar_text(at) and "data source unavailable" in _sidebar_text(at)
+    assert "for your 2 holdings" in _body(at)
+
+    at.run()                                # inside the 60 s window: the failure is still remembered
+    assert calls == ["FLAKY"] and "FLAKY" in _sidebar_text(at)
+
+    clock.now += 61
+    at.run()
+    assert calls == ["FLAKY", "FLAKY"]
+    assert "FLAKY" not in _sidebar_text(at) and "for your 3 holdings" in _body(at)
+
+    at.run()                                # now settled, so the next rerun asks nobody
+    assert calls == ["FLAKY", "FLAKY"]
 
 
 def _stress_traces(at):

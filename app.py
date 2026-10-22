@@ -28,7 +28,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from scipy.stats import norm
 
-from risk_engine import data, importer, inputs, portfolio, report
+from risk_engine import data, importer, inputs, portfolio, report, stress
 from risk_engine import metrics
 from risk_engine import optimize
 from risk_engine import backtest
@@ -422,20 +422,42 @@ if len(_parsed.holdings) > MAX_HOLDINGS:
     st.stop()
 
 
+class _Unsettled(Exception):
+    """A report that left out a ticker for a reason a retry could fix; raised so the cache
+    never keeps it."""
+
+    def __init__(self, result):
+        super().__init__("a lookup failed for now")
+        self.result = result
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
-def _build_report(holdings_items, conf, shrinkage, as_of, source, _snap, _live_fetch):
+def _settled_report(holdings_items, conf, shrinkage, as_of, source, _snap, _live_fetch):
     """One report per (holdings, settings, data version). The underscore arguments are
     not hashed: the snapshot is identified by as_of + source. The daily log returns come
     back with the report, for the sections that compute from them directly."""
     inp = inputs.prepare(dict(holdings_items), _snap, live_fetch=_live_fetch,
                          max_live=LIVE_MAX_UI, budget_s=LIVE_BUDGET_UI_S, allow_rejected=True)
-    return report.report_from_inputs(inp, confidence=conf, shrinkage=shrinkage), inp.lr, inp.pr
+    result = report.report_from_inputs(inp, confidence=conf, shrinkage=shrinkage), inp.lr, inp.pr
+    if any(r.retryable for r in inp.res.rejected):
+        raise _Unsettled(result)
+    return result
+
+
+def _build_report(holdings_items, conf, shrinkage, snap, live_fetch):
+    """A report that left a ticker out because Yahoo failed is rebuilt on the next rerun, so
+    the lookup is tried again as soon as `_live` lets it (a minute), not an hour from now."""
+    try:
+        return _settled_report(holdings_items, conf, shrinkage, snap.as_of, snap.source,
+                               snap, live_fetch)
+    except _Unsettled as unsettled:
+        return unsettled.result
 
 
 with st.spinner("Looking up tickers and running the numbers..."):
     try:
         rep, lr, pr = _build_report(tuple(_parsed.holdings.items()), conf, use_shrinkage,
-                                    snap.as_of, snap.source, snap, _live)
+                                    snap, _live)
     except inputs.PortfolioError as e:
         rep, _error = None, e
 _rejected = rep["data"]["rejected"] if rep is not None else _error.rejected
@@ -759,8 +781,8 @@ if _missed:
     st.caption("Not shown, because a holding was not yet trading: " + "; ".join(
         f"{label} ({', '.join(tickers)})" for label, tickers in _missed.items()))
 if _sparse:
-    st.caption("Not shown, because the data has fewer than 5 clean trading days in the window: "
-               + "; ".join(_sparse))
+    st.caption(f"Not shown, because the data has fewer than {stress.MIN_CRISIS_DAYS} clean "
+               f"trading days in the window: " + "; ".join(_sparse))
 
 # ── CORRELATION MATRIX ────────────────────────────────────────
 st.markdown("<div class='sec'>Correlation matrix — how your holdings move together</div>",
