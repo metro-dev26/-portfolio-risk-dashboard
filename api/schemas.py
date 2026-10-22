@@ -1,7 +1,7 @@
 """pydantic request/response models for the risk API. Validation is free credibility:
 bad input becomes a clean 422 instead of a 500 deep in the engine."""
 import math
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -387,3 +387,21 @@ class ReportResponse(BaseModel):
     optimizer: OptimizerSection
     monte_carlo: MonteCarloSection
     data: ReportData
+
+
+class UniverseRow(BaseModel):
+    ticker: str
+    name: str
+    sector: str
+    asset_class: str
+    in_sp500: bool
+
+
+class ImportRequest(BaseModel):
+    format: Literal["csv", "paste"]
+    text: str = Field(max_length=200_000)
+
+
+class ImportResponse(BaseModel):
+    holdings: dict[str, float]
+    notes: list[str]

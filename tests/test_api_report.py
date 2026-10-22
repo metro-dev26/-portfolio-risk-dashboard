@@ -1,5 +1,6 @@
 import dataclasses
 
+import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
@@ -136,3 +137,123 @@ def test_response_models_keep_every_key_when_the_optimizer_is_unavailable(monkey
     rep = build_report(BODY["holdings"])
     assert rep["optimizer"]["available"] is False
     assert ReportResponse.model_validate(rep).model_dump() == rep
+
+
+def test_universe_lists_tickers_with_names_sorted():
+    rows = client.get("/universe").json()
+    tickers = [r["ticker"] for r in rows]
+    assert tickers == sorted(tickers) and "AAPL" in tickers and "TLT" in tickers
+    tlt = next(r for r in rows if r["ticker"] == "TLT")
+    assert tlt == {"ticker": "TLT", "name": "iShares 20+ Year Treasury Bond ETF",
+                   "sector": "Govt Bonds", "asset_class": "Bond", "in_sp500": False}
+
+
+def test_universe_leaves_out_quarantined_and_priceless_tickers(monkeypatch):
+    snap = data.load_snapshot()
+    held_back = dataclasses.replace(
+        snap, report={**snap.report, "quarantined": {"AAPL": "stale price"}},
+        prices=snap.prices.drop(columns=["MSFT"]))
+    monkeypatch.setattr(data, "load_snapshot", lambda: held_back)
+    tickers = [r["ticker"] for r in client.get("/universe").json()]
+    assert "AAPL" not in tickers and "MSFT" not in tickers and "JPM" in tickers
+
+
+def test_import_paste_returns_holdings_and_notes():
+    r = client.post("/import", json={"format": "paste", "text": "AAPL 10000\nMSFT 5,000\ngarbage"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["holdings"] == {"AAPL": 10000.0, "MSFT": 5000.0}
+    assert any("line 3" in n for n in body["notes"])
+
+
+def test_import_csv_values_share_counts_at_the_snapshot_close():
+    close = float(data.load_snapshot().prices["AAPL"].dropna().iloc[-1])
+    r = client.post("/import", json={"format": "csv", "text": "Symbol,Quantity\nAAPL,10\n"})
+    assert r.json()["holdings"]["AAPL"] == pytest.approx(10 * close)
+
+
+def test_import_csv_skips_a_share_count_it_has_no_price_for():
+    r = client.post("/import", json={"format": "csv", "text": "Symbol,Quantity\nZZZZ,10\nAAPL,1\n"})
+    body = r.json()
+    assert set(body["holdings"]) == {"AAPL"}
+    assert any("ZZZZ" in n and "no price" in n for n in body["notes"])
+
+
+def test_import_rejects_oversized_text_and_unknown_format():
+    assert client.post("/import", json={"format": "csv", "text": "x" * 200_001}).status_code == 422
+    assert client.post("/import", json={"format": "xlsx", "text": "a"}).status_code == 422
+
+
+@pytest.mark.parametrize("body", [
+    {"format": "paste"},
+    {"text": "AAPL 1"},
+    {"format": "paste", "text": None},
+    {"format": "paste", "text": 12345},
+    {"format": "paste", "text": ["AAPL 1"]},
+    ["paste", "AAPL 1"],
+], ids=["no-text", "no-format", "null-text", "number-text", "list-text", "array-body"])
+def test_import_malformed_bodies_are_422s(body):
+    assert client.post("/import", json=body).status_code == 422
+
+
+def test_import_body_that_is_not_json_is_a_422():
+    r = client.post("/import", content=b"{not json", headers={"Content-Type": "application/json"})
+    assert r.status_code == 422
+
+
+def test_import_text_at_the_limit_is_accepted():
+    r = client.post("/import", json={"format": "paste", "text": "x" * 200_000})
+    assert r.status_code == 200
+    assert r.json()["holdings"] == {}
+
+
+@pytest.mark.parametrize("text", [
+    "Symbol,Value\n" + "A" * 150_000 + ",1\n",
+    "Symbol,Value\nAAPL,\x00\x00\n",
+    'Symbol,Value\nAAPL,"unterminated\n',
+    "Symbol,Quantity\nAAPL," + "9" * 5_000 + "\n",
+    "﻿﻿",
+], ids=["field-over-csv-limit", "nul-bytes", "open-quote", "overflowing-quantity", "bom-only"])
+def test_import_hostile_csv_is_a_200_with_notes_never_a_500(text):
+    r = TestClient(app, raise_server_exceptions=False).post("/import", json={"format": "csv", "text": text})
+    assert r.status_code == 200, r.text
+    assert r.json()["holdings"] == {}
+
+
+def _unavailable():
+    raise data.SnapshotUnavailable("no bundle could be read")
+
+
+def test_universe_is_a_503_when_the_snapshot_is_unusable(monkeypatch):
+    monkeypatch.setattr(data, "load_snapshot", _unavailable)
+    r = client.get("/universe")
+    assert r.status_code == 503
+    assert "no bundle could be read" in r.json()["detail"]
+
+
+def test_import_csv_is_a_503_when_the_snapshot_is_unusable_but_paste_needs_none(monkeypatch):
+    monkeypatch.setattr(data, "load_snapshot", _unavailable)
+    csv_resp = client.post("/import", json={"format": "csv", "text": "Symbol,Quantity\nAAPL,10\n"})
+    assert csv_resp.status_code == 503
+    assert "no bundle could be read" in csv_resp.json()["detail"]
+    assert client.post("/import", json={"format": "paste", "text": "AAPL 10"}).status_code == 200
+
+
+class _CountingPrices(pd.DataFrame):
+    column_reads = 0
+
+    def __getitem__(self, key):
+        type(self).column_reads += 1
+        return super().__getitem__(key)
+
+
+def test_import_csv_looks_a_repeated_symbol_up_once(monkeypatch):
+    snap = data.load_snapshot()
+    close = float(snap.prices["AAPL"].dropna().iloc[-1])
+    counting = dataclasses.replace(snap, prices=_CountingPrices(snap.prices))
+    _CountingPrices.column_reads = 0
+    monkeypatch.setattr(data, "load_snapshot", lambda: counting)
+    text = "Symbol,Quantity\n" + "AAPL,1\n" * 500
+    body = client.post("/import", json={"format": "csv", "text": text}).json()
+    assert body["holdings"]["AAPL"] == pytest.approx(500 * close)
+    assert _CountingPrices.column_reads == 1

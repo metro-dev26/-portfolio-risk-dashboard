@@ -1,6 +1,7 @@
 """FastAPI transport over the pure risk engine. Handlers are thin: validate
 (via pydantic) -> call the engine/store -> return a typed model. The auto-generated
 Swagger UI at /docs is the point. Educational tool, not financial advice."""
+import functools
 import logging
 import math
 from contextlib import contextmanager
@@ -12,10 +13,10 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 
 from api import store
-from api.schemas import (AnalyzeRequest, AnalyzeResponse, DegradedResponse, PortfolioIn,
-                         PortfolioOut, ProblemResponse, ReportRequest, ReportResponse,
-                         UnavailableResponse)
-from risk_engine import data
+from api.schemas import (AnalyzeRequest, AnalyzeResponse, DegradedResponse, ImportRequest,
+                         ImportResponse, PortfolioIn, PortfolioOut, ProblemResponse,
+                         ReportRequest, ReportResponse, UnavailableResponse, UniverseRow)
+from risk_engine import data, importer
 from risk_engine.analyze import analyze_portfolio
 from risk_engine.inputs import PortfolioError
 from risk_engine.report import build_report
@@ -108,6 +109,46 @@ def report(req: ReportRequest):
     """Everything the dashboard shows for one portfolio, in one call: the 1-99 risk score
     beside the S&P 500's, the bad-year dollar range, and every detail section."""
     return _report_or_http_error(req.holdings, confidence=req.confidence, shrinkage=req.shrinkage)
+
+
+def _snapshot_or_http_error():
+    with _engine_refusals_as_http_errors():
+        return data.load_snapshot()
+
+
+@app.get("/universe", response_model=list[UniverseRow], responses={
+    503: {"model": UnavailableResponse, "description": "No market-data snapshot could be read."}})
+def universe():
+    """Every ticker in today's dataset, for search-as-you-type. Tickers outside it still
+    work in /report through a live lookup."""
+    snap = _snapshot_or_http_error()
+    return [{"ticker": t, "name": m["name"], "sector": m["sector"],
+             "asset_class": m["asset_class"], "in_sp500": bool(m.get("in_sp500", False))}
+            for t, m in sorted(snap.universe.items())
+            if t in snap.prices.columns and t not in snap.quarantined]
+
+
+@app.post("/import", response_model=ImportResponse, responses={
+    503: {"model": UnavailableResponse,
+          "description": "A CSV of share counts needs the dataset's closing prices and none "
+                         "could be read. Pasted text never needs them."}})
+def import_holdings(req: ImportRequest):
+    """Parse a broker CSV export or pasted 'TICKER AMOUNT' lines into holdings. Share
+    counts are valued at the dataset's latest close; nothing is analysed here."""
+    if req.format == "paste":
+        parsed = importer.parse_paste(req.text)
+    else:
+        snap = _snapshot_or_http_error()
+
+        @functools.cache  # a 200 KB file can repeat one symbol 25,000 times
+        def last_price(sym):
+            if sym not in snap.prices.columns:
+                return None
+            closes = snap.prices[sym].dropna()
+            return float(closes.iloc[-1]) if len(closes) else None
+
+        parsed = importer.parse_csv(req.text, last_price=last_price)
+    return {"holdings": parsed.holdings, "notes": parsed.notes}
 
 
 @app.post("/portfolios", response_model=PortfolioOut)
