@@ -70,12 +70,14 @@ It is linear on purpose. Tam has to be able to explain it in one sentence: "scor
 **Calibration check before ship:**
 - Record SPY's score in this spec.
 - If SPY lands outside 15–50, the 0.60 constant is wrong for this data. Stop and raise it with Tam rather than quietly tuning it.
+- **Measured 2026-10-23:** SPY scores **28** on the fixture snapshot (as of 2026-06-18), in the report for AAPL $30,000 / JPM $20,000 / TLT $40,000 / IEF $10,000 (window 2018-01-02 to 2026-06-18, seed 42). That falls inside 15–50, so 0.60 stays. A 1-in-20 bad year in SPY costs about 17%.
 
 **Property tests:**
 - The score rises when L rises (monotonic).
 - An all-SPY portfolio scores the same as the benchmark score.
 - A single high-volatility stock (TSLA) scores above SPY.
-- A bond-heavy portfolio (TLT+IEF) scores below SPY.
+- Intermediate Treasuries (IEF) score below SPY. Long-duration Treasuries do not: the score includes drift, and on the 2018–2026 data TLT scores about 40 against SPY's 30, while a TLT/IEF 50/50 mix ties SPY.
+- The mixed 30/20/40/10 portfolio (AAPL, JPM, TLT, IEF) still scores below SPY.
 - The score is bounded to 1..99.
 
 ## 3. Architecture
@@ -133,7 +135,7 @@ Built once per request. Every section reads from it.
 - **Returned per horizon (126 / 252 / 504 / 756 days):**
   - Terminal P5, P50 and P95
   - P(loss), P(up 20%)
-- **Fan chart:** percentile bands (5/25/50/75/95) every 5 trading days. That is 152 points × 5 bands, not 756 × 5.
+- **Fan chart:** percentile bands (5/25/50/75/95) every 6 trading days. That is 127 points × 5 bands, not 756 × 5. Every horizon is a multiple of 6, so each one lands on a band point.
 
 ## 5. `POST /report`
 
@@ -153,20 +155,20 @@ Built once per request. Every section reads from it.
 
 | Key | Contents | Feeds section |
 |---|---|---|
-| `score` | `portfolio {score, loss_dollars, gain_dollars, bad_year_loss_pct}`, `benchmark {same}`, `horizon_days: 252` | headline |
+| `score` | `portfolio {score, loss_dollars, gain_dollars, bad_year_loss}` (`bad_year_loss` is a fraction), `benchmark {same}`, `horizon_days: 252` | headline |
 | `portfolio` | value, holdings `[{ticker, name, sector, type, asset_class, amount, weight}]` | header, profile |
 | `risk` | hist/gaussian VaR and CVaR as fractions **and** dollars, confidence, the hist–gauss gap in dollars | 1 Daily downside |
 | `profile` | annual vol, Sharpe, max drawdown, mean-log annual return | 2 Profile |
 | `benchmark` | the table rows above for portfolio vs SPY, beta, growth series for both | 3 Benchmark |
 | `distribution` | histogram edges and densities, mu, std (the frontend draws the normal curve) | 4 Distribution |
 | `drawdown` | series | 5 Drawdown |
-| `stress` | per crisis: label, context, start, end, status (`ok` / `not_covered` / `too_few_days`), missing tickers, total, worst_day, max_dd, loss_dollars, path series | 6 Stress |
-| `correlation` | tickers, matrix (rounded to 3 dp) | 7 Correlation |
+| `stress` | per crisis: label, context, start, end, status (`ok` / `not_covered` / `too_few_days`), missing tickers, total, worst_day, max_dd, `change_dollars` (signed; negative is a loss), path series | 6 Stress |
+| `correlation` | tickers, matrix (rounded to 3 dp; a cell is null for a flat-priced holding) | 7 Correlation |
 | `backtest` | per method: observations, breaches, expected, kupiec_p, christoffersen_p, passed; plus series `{dates, var, realized, breach}` | 8 Model validation |
 | `risk_contribution` | per ticker: weight, risk share; the biggest over-contributor; the best diversifier (or null) | 9 Risk contribution |
 | `factors` | `available: bool`, `reason` if not, betas, alpha, r², variance split | 10 Factors |
-| `optimizer` | `available`, `reason`; current / max-Sharpe / min-var `{ret, vol, sharpe, weights}`; frontier points; reallocation rows `[{ticker, type, sector, current, suggested, delta_dollars}]`; sector mix (sectors, equity, diversified, unplaced, non_equity); concentration flag | 11 Optimizer |
-| `monte_carlo` | per-horizon terminals and probabilities; bands every 5 days; n_sims, seed | 12 Monte Carlo |
+| `optimizer` | `available`, `reason`; current / max-Sharpe / min-var `{ret, vol, sharpe, weights}`; frontier points; reallocation rows `[{ticker, asset_class, sector, current, suggested, delta_dollars}]`; sector mix (sectors, equity, diversified, unplaced, non_equity); concentration flag | 11 Optimizer |
+| `monte_carlo` | per-horizon terminals and probabilities; bands every 6 days; n_sims, seed | 12 Monte Carlo |
 | `data` | as_of, window start and days, window status and message, `assumptions: [str]` | 13 Assumptions, footer |
 
 **Partial results, not 422s.** A section that can't be computed returns `available: false` plus a human reason instead of killing the whole report:
@@ -176,7 +178,9 @@ Built once per request. Every section reads from it.
 
 **Still a 422:** any rejected ticker, or a window shorter than 252 days. The report is meaningless without them. The body is per-ticker problems, same shape as `/analyze`.
 
-**Size:** daily series are rounded to 6 significant digits. `GZipMiddleware` (minimum 1 KB) handles the rest.
+`/analyze` has no partial sections, so there a non-converging optimizer is a 422 with an `(optimizer)` problem.
+
+**Size:** daily series of fractions (returns, drawdowns, VaR) keep 6 significant digits. Dollar series (benchmark growth, Monte Carlo bands) are rounded to the cent, because significant digits would round a $2M portfolio to the nearest $10. `GZipMiddleware` (minimum 1 KB) handles the rest.
 
 ## 6. Other endpoint changes
 
@@ -189,6 +193,7 @@ Built once per request. Every section reads from it.
 - Request: `{format: "csv" | "paste", text}`, with `text` at most 200 KB.
 - Response: `{holdings, notes}` from the existing `importer.parse_csv` / `parse_paste`, with last prices from the snapshot.
 - It parses only and never analyses.
+- It returns at most 50 notes, plus one "…and N more" summary note, so a 200 KB paste of junk can't come back as 100,000 notes.
 
 **`/portfolios` — security fix.** This is live today and **has a privacy hole**:
 - `GET /portfolios` lists every saved portfolio from every user.
@@ -204,6 +209,7 @@ Fixes:
 **CORS:**
 - `CORSMiddleware` reads allowed origins from env `ALLOWED_ORIGINS` (comma-separated), defaulting to `http://localhost:5173`.
 - Methods: GET and POST. No credentials.
+- It exposes `Retry-After`, so the browser can read it on a 429 or 503.
 - Project C adds the production origin.
 
 **Rate limits.** In-memory, single instance, about 40 lines in `api/limits.py`. No new dependency.
@@ -218,8 +224,11 @@ Per-IP fixed window of 60 seconds:
 | everything else | 60 per minute |
 
 - Over the limit returns 429 with `Retry-After`.
+- `GET /portfolios/{id}?analyze=true` runs a full analysis, so it goes through the compute gate and counts against the `/analyze` limit, not the general one.
 - **Client IP** is the **last** `X-Forwarded-For` entry, the one Render's proxy adds. The first entry is client-controlled and spoofable. This is verified on Render in the measurement step. If Render's header differs, the rule changes before ship.
 - **Compute gate:** `/report` and `/analyze` share a `threading.BoundedSemaphore(2)`. A request that can't get a slot within 15 s returns 503 `{"detail": "busy"}` with `Retry-After: 10`. This protects memory, not just CPU.
+  - At most 8 requests wait for a slot (`max_waiting=8`). Beyond that, the request gets an immediate 503 busy instead of tying up another worker thread for 15 s.
+- **422 bodies:** a 422 echoes the offending input back, at most 200 characters per string, with lone surrogates replaced, so a huge or unencodable value can't turn the 422 into a 500 or an outsized response.
 
 ## 7. Bugs fixed along the way
 
@@ -234,7 +243,7 @@ These were found in the extraction survey. Each fix gets a test that fails on th
 | 5 | app.py:708, `CRISIS_COLOR` | Hard-coded per label; adding a crisis to config crashes the page | Colour by position in the list |
 | 6 | Beta, app.py | `np.cov` (ddof=1) over `np.var` (ddof=0) | ddof=1 for both |
 | 7 | Monte Carlo text, app.py:1249 | "1 year in 20" is hard-coded for every horizon | Text uses the chosen horizon |
-| 8 | API showcase, app.py:238-261 | Hard-coded sample numbers "computed 2026-08-23" | Left as is but labelled "example from 2026-08-23" (live numbers come with the React page) |
+| 8 | API showcase, app.py:238-261 | Hard-coded sample numbers "computed 2026-08-23" | Left as is. It was already labelled "computed 2026-08-23", so no change was needed (live numbers come with the React page) |
 | 9 | `backtest` | The historical rolling VaR is computed twice | `backtest_var` returns the series |
 
 Fixes 1 and 6 change numbers Streamlit shows today, by about 1% and a hair respectively. They are corrections, not regressions.
