@@ -285,3 +285,49 @@ def test_a_body_exactly_at_the_cap_goes_through():
     scope = {"type": "http", "method": "POST", "path": "/x", "headers": [(b"content-length", b"100")]}
     asyncio.run(limits.BodyLimit(app, caps={}, default=100)(scope, receive, send))
     assert got == [b"x" * 100]
+
+
+class _Req:
+    def __init__(self, forwarded=None, host="10.0.0.7"):
+        self.headers = {} if forwarded is None else {"x-forwarded-for": forwarded}
+        self.client = type("C", (), {"host": host})() if host else None
+
+
+def test_client_ip_default_is_the_last_entry():
+    assert limits.client_ip(_Req("6.6.6.6, 9.9.9.9")) == "9.9.9.9"
+    assert limits.client_ip(_Req("9.9.9.9")) == "9.9.9.9"
+
+
+def test_client_ip_counts_trusted_proxy_hops_from_the_right():
+    req = _Req("6.6.6.6, 7.7.7.7, 9.9.9.9")
+    assert limits.client_ip(req, hops=1) == "9.9.9.9"
+    assert limits.client_ip(req, hops=2) == "7.7.7.7"        # one more proxy in front adds an entry
+    assert limits.client_ip(req, hops=3) == "6.6.6.6"
+
+
+def test_client_ip_skips_empty_entries():
+    assert limits.client_ip(_Req("1.2.3.4,")) == "1.2.3.4"
+    assert limits.client_ip(_Req("1.2.3.4, , ")) == "1.2.3.4"
+    assert limits.client_ip(_Req("5.5.5.5,,1.2.3.4,"), hops=2) == "5.5.5.5"
+
+
+@pytest.mark.parametrize("forwarded, hops", [
+    (None, 1), ("", 1), (" , ", 1), ("9.9.9.9", 2), ("1.2.3.4,", 2)],
+    ids=["no-header", "empty", "only-separators", "too-short-for-two-hops", "empty-entry-not-counted"])
+def test_client_ip_falls_back_to_the_socket_peer(forwarded, hops):
+    assert limits.client_ip(_Req(forwarded), hops=hops) == "10.0.0.7"
+
+
+def test_client_ip_without_header_or_peer_is_unknown():
+    assert limits.client_ip(_Req(None, host=None)) == "unknown"
+
+
+def test_trusted_proxy_hops_comes_from_the_environment():
+    assert limits.trusted_proxy_hops({}) == 1
+    assert limits.trusted_proxy_hops({"TRUSTED_PROXY_HOPS": "2"}) == 2
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "two", ""])
+def test_a_bad_trusted_proxy_hops_stops_the_server_starting(raw):
+    with pytest.raises(ValueError, match="TRUSTED_PROXY_HOPS"):
+        limits.trusted_proxy_hops({"TRUSTED_PROXY_HOPS": raw})

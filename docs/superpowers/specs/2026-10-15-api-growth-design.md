@@ -225,7 +225,7 @@ Per-IP fixed window of 60 seconds:
 
 - Over the limit returns 429 with `Retry-After`.
 - `GET /portfolios/{id}?analyze=true` runs a full analysis, so it goes through the compute gate and counts against the `/analyze` limit, not the general one.
-- **Client IP** is the **last** `X-Forwarded-For` entry, the one Render's proxy adds. The first entry is client-controlled and spoofable. This is verified on Render in the measurement step. If Render's header differs, the rule changes before ship.
+- **Client IP** is the **last** `X-Forwarded-For` entry, the one Render's proxy adds. The first entry is client-controlled and spoofable. This is verified on Render in the measurement step. If Render's header differs, the rule changes before ship. Env `TRUSTED_PROXY_HOPS` (default 1) sets how many entries from the right the client is, for a deployment with more proxies in front; empty entries are ignored, a missing or too-short header falls back to the socket peer, and a value below 1 stops the server starting.
 - **Compute gate:** `/report` and `/analyze` share a `threading.BoundedSemaphore(2)`. A request that can't get a slot within 15 s returns 503 `{"detail": "busy"}` with `Retry-After: 10`. This protects memory, not just CPU.
   - At most 8 requests wait for a slot (`max_waiting=8`). Beyond that, the request gets an immediate 503 busy instead of tying up another worker thread for 15 s.
 - **422 bodies:** a 422 echoes the offending input back, at most 200 characters per string and at most 20 items per list or dict (the rest is a `"…N more"` marker, or a `"…": "N more"` entry in a dict), with lone surrogates replaced, so a huge or unencodable value can't turn the 422 into a 500 or an outsized response.

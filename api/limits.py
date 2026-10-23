@@ -3,6 +3,7 @@ on request-body size.
 
 In-memory, so they suit one free instance and reset on restart. They stop one
 client hogging the service; they are not a defence against a determined attacker."""
+import os
 import threading
 import time
 from contextlib import contextmanager
@@ -135,9 +136,31 @@ def _declared_length(scope):
     return None
 
 
-def client_ip(request):
-    """Render's proxy appends the address it saw; earlier entries are client-supplied."""
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[-1].strip()
+def trusted_proxy_hops(environ=os.environ):
+    """How many proxies of ours sit in front of the app: env TRUSTED_PROXY_HOPS, default 1
+    (Render's). A bad value stops the server starting rather than quietly trusting the wrong
+    entry; 0 is refused because it would read the client-controlled first entry."""
+    raw = environ.get("TRUSTED_PROXY_HOPS", "1")
+    try:
+        hops = int(raw)
+    except ValueError:
+        hops = 0
+    if hops < 1:
+        raise ValueError(f"TRUSTED_PROXY_HOPS must be a whole number of at least 1, got {raw!r}")
+    return hops
+
+
+TRUSTED_PROXY_HOPS = trusted_proxy_hops()
+
+
+def client_ip(request, hops=None):
+    """The address our outermost proxy saw. Each proxy of ours appends the address it received
+    from, so the client is `hops` entries from the right; everything left of that is
+    client-supplied. Empty entries (a trailing comma) don't count. A missing or too-short
+    header falls back to the socket peer, which lumps clients together but can't be spoofed."""
+    hops = TRUSTED_PROXY_HOPS if hops is None else hops
+    header = request.headers.get("x-forwarded-for", "")
+    entries = [e for e in (part.strip() for part in header.split(",")) if e]
+    if len(entries) >= hops:
+        return entries[-hops]
     return request.client.host if request.client else "unknown"
