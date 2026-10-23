@@ -154,3 +154,28 @@ def test_dollar_series_stay_exact_to_the_cent_at_a_trillion_dollars():
     mc = rep["monte_carlo"]
     year = next(h for h in mc["horizons"] if h["days"] == 252)
     assert mc["bands"]["p50"][mc["band_days"].index(252)] == pytest.approx(year["p50"], rel=0, abs=HALF_A_CENT)
+
+
+def _monte_carlo_line(report):
+    return next(a for a in report["data"]["assumptions"] if a.startswith("The Monte Carlo replays"))
+
+
+def test_the_assumption_names_the_day_the_monte_carlo_replay_starts(rep):
+    start = rep["data"]["window_start"]
+    assert f"replays real past days from {start} onward" in _monte_carlo_line(rep)
+
+
+def test_the_assumption_follows_a_holding_that_listed_late():
+    snap = data.load_snapshot()
+    prices = snap.prices.copy()
+    prices.loc[prices.index < "2022-06-01", "JPM"] = float("nan")
+    late = build_report(H, snapshot=dataclasses.replace(snap, prices=prices))
+    start = late["data"]["window_start"]
+    assert start >= "2022-06-01"
+    line = _monte_carlo_line(late)
+    assert f"from {start} onward" in line and "2018" not in line
+
+
+def test_the_other_assumptions_are_the_same_for_every_window(rep):
+    assert len(rep["data"]["assumptions"]) == 7
+    assert rep["data"]["assumptions"][-1] == "Educational tool, not financial advice."

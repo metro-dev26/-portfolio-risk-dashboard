@@ -234,3 +234,8 @@ def test_openapi_documents_the_engine_422_and_the_503s():
     assert {"200", "422", "503"} <= set(analyze)
     assert "problems" in analyze["422"]["description"]
     assert "503" in spec["paths"]["/health"]["get"]["responses"]
+
+
+def test_openapi_names_both_data_wide_problems_on_analyze():
+    description = client.get("/openapi.json").json()["paths"]["/analyze"]["post"]["responses"]["422"]["description"]
+    assert "(factors)" in description and "(optimizer)" in description

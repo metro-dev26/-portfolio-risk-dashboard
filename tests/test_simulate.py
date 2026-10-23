@@ -103,3 +103,22 @@ def test_peak_memory_stays_under_150_mb_at_full_size(market):
         tracemalloc.stop()
     assert peak < 150 * 2**20, f"peak {peak / 2**20:.0f} MB"
 
+
+
+@pytest.mark.parametrize("field, bad", [
+    ("p5", float("nan")), ("p5", float("-inf")), ("p95", float("nan")), ("p95", float("inf"))])
+def test_scoring_a_run_with_a_non_finite_horizon_value_is_an_error_not_a_score_of_one(field, bad):
+    """max(0, nan) is 0, which would score a broken run as the safest portfolio there is."""
+    h = {"p5": 76_000.0, "p50": 105_000.0, "p95": 131_000.0, "prob_loss": 0.3, "prob_up20": 0.2}
+    h[field] = bad
+    s = sim_mod.Simulation(value=100_000, band_days=[0], bands={}, horizons={252: h})
+    with pytest.raises(ValueError, match=field):
+        risk_score(s)
+
+
+def test_scoring_a_run_with_a_non_finite_value_is_an_error():
+    s = sim_mod.Simulation(value=float("nan"), band_days=[0], bands={},
+                           horizons={252: {"p5": 1.0, "p50": 1.0, "p95": 1.0,
+                                           "prob_loss": 0.0, "prob_up20": 0.0}})
+    with pytest.raises(ValueError, match="value"):
+        risk_score(s)

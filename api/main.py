@@ -161,7 +161,7 @@ def _gated(fn, *args, **kwargs):
           "description": "The holdings were refused. Request-schema failures return `detail` "
                          "as a list of validation errors; holdings the engine can't use return "
                          "`detail.problems`, one `{ticker, reason}` per ticker (a data-wide "
-                         "problem is reported under the ticker `(factors)`)."},
+                         "problem is reported under the ticker `(factors)` or `(optimizer)`)."},
     503: {"model": UnavailableResponse,
           "description": "No market-data snapshot could be read, or the server is busy (`detail: busy`, "
                          "retry after the `Retry-After` seconds)."}})

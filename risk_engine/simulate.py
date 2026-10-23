@@ -4,6 +4,7 @@ One run draws the longest horizon once. Every shorter horizon, the fan-chart ban
 and the risk score are read off that one run, so they can never disagree. Passing
 the same `draws` to two portfolios (yours and the S&P 500) gives both the same
 random days, so their scores differ only because the holdings do."""
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -66,5 +67,9 @@ def score_from_loss(loss):
 
 def risk_score(sim):
     h = sim.horizons[SCORE_HORIZON]
+    for name, x in (("value", sim.value), ("p5", h["p5"]), ("p95", h["p95"])):
+        if not math.isfinite(x):
+            # max(0, nan) is 0, so a broken run would score 1, the safest there is.
+            raise ValueError(f"cannot score a simulation whose {name} is {x}")
     loss = max(0.0, 1.0 - h["p5"] / sim.value)
     return Score(score_from_loss(loss), loss, max(0.0, sim.value - h["p5"]), h["p95"] - sim.value)

@@ -20,21 +20,25 @@ FRONTIER_POINTS = 40
 DIVERSIFIER_MARGIN = 0.02     # risk share this far under capital share counts as a diversifier
 REALLOC_THRESHOLD = 0.01      # weight change smaller than this is not worth suggesting
 
-ASSUMPTIONS = [
-    "Risk numbers come from this portfolio's own daily returns over the window shown; the "
-    "future can differ from the past.",
-    "The Monte Carlo replays real past days from 2018 onward, mostly a rising market, so the "
-    "bad-year figure leans optimistic. The S&P 500 score replays the same days, so the "
-    "comparison stays fair.",
-    "Replaying days one at a time ignores that bad days come in clusters, so short-horizon "
-    "losses are understated.",
-    "Growth charts rebalance to today's weights every day; the stress test holds today's "
-    "weights without rebalancing.",
-    "Expected returns are average daily log returns times 252, slightly below the arithmetic "
-    "average.",
-    "Dollar figures convert log returns to real gains and losses with exp(r) - 1.",
-    "Educational tool, not financial advice.",
-]
+
+def assumptions(window_start):
+    """The plain-words caveats shown with a report. The Monte Carlo replays this report's own
+    window, which starts later than 2018 when a holding's history does."""
+    return [
+        "Risk numbers come from this portfolio's own daily returns over the window shown; the "
+        "future can differ from the past.",
+        f"The Monte Carlo replays real past days from {window_start} onward, mostly a rising "
+        "market, so the bad-year figure leans optimistic. The S&P 500 score replays the same "
+        "days, so the comparison stays fair.",
+        "Replaying days one at a time ignores that bad days come in clusters, so short-horizon "
+        "losses are understated.",
+        "Growth charts rebalance to today's weights every day; the stress test holds today's "
+        "weights without rebalancing.",
+        "Expected returns are average daily log returns times 252, slightly below the arithmetic "
+        "average.",
+        "Dollar figures convert log returns to real gains and losses with exp(r) - 1.",
+        "Educational tool, not financial advice.",
+    ]
 
 
 def _sig(x, digits=6):
@@ -191,6 +195,7 @@ def report_from_inputs(inp, *, confidence=0.95, shrinkage=False):
     cmp_ = benchmark.compare(inp.pr, inp.spy_r, inp.value)
     corr = metrics.correlation(inp.lr, inp.tickers)
     win = inp.window
+    window_start = str(win.start.date())
     return {
         "score": {"portfolio": _score(simulate.risk_score(sim)),
                   "benchmark": _score(simulate.risk_score(bench)),
@@ -216,12 +221,12 @@ def report_from_inputs(inp, *, confidence=0.95, shrinkage=False):
         "factors": _factors(inp),
         "optimizer": _optimizer(inp, shrinkage),
         "monte_carlo": _monte_carlo(sim),
-        "data": {"as_of": inp.snap.as_of, "window_start": str(win.start.date()),
+        "data": {"as_of": inp.snap.as_of, "window_start": window_start,
                  "window_end": str(win.end.date()), "window_days": int(win.n_days),
                  "window_status": win.status, "window_message": win.message,
                  "rejected": [{"ticker": r.ticker, "amount": r.amount, "reason": r.reason}
                               for r in inp.res.rejected],
-                 "assumptions": ASSUMPTIONS},
+                 "assumptions": assumptions(window_start)},
     }
 
 
