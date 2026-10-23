@@ -1,10 +1,16 @@
-"""Per-IP fixed-window rate limits and a cap on concurrent heavy computations.
+"""Per-IP fixed-window rate limits, a cap on concurrent heavy computations, and a cap
+on request-body size.
 
 In-memory, so they suit one free instance and reset on restart. They stop one
 client hogging the service; they are not a defence against a determined attacker."""
 import threading
 import time
 from contextlib import contextmanager
+
+from fastapi.exceptions import HTTPException
+from starlette.responses import JSONResponse
+
+TOO_LARGE = "request body too large"
 
 
 class Busy(Exception):
@@ -79,6 +85,54 @@ class ComputeGate:
             yield
         finally:
             self._sem.release()
+
+
+class BodyLimit:
+    """ASGI middleware: a request body over its path's cap is a 413, before the app parses it.
+
+    A parsed body costs many times its size in memory (a 20 MB body of 1.5M holdings took
+    the process from 302 to 799 MiB), so an oversized one must never reach pydantic. A
+    declared Content-Length over the cap is refused without reading a byte. A chunked body
+    has no declared length, so its bytes are counted as the app pulls them and the request
+    fails with a 413 the moment the count passes the cap. Cap lookup is by exact path;
+    anything not in `caps` gets `default`."""
+
+    def __init__(self, app, caps, default):
+        self.app, self._caps, self._default = app, dict(caps), default
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        cap = self._caps.get(scope["path"], self._default)
+        declared = _declared_length(scope)
+        if declared is not None and declared > cap:
+            refusal = JSONResponse(status_code=413, content={"detail": TOO_LARGE})
+            return await refusal(scope, receive, send)
+        seen = 0
+
+        async def counted():
+            nonlocal seen
+            message = await receive()
+            if message["type"] == "http.request":
+                seen += len(message.get("body", b""))
+                if seen > cap:
+                    # FastAPI re-raises an HTTPException from the body read as itself.
+                    raise HTTPException(status_code=413, detail=TOO_LARGE)
+            return message
+
+        await self.app(scope, counted, send)
+
+
+def _declared_length(scope):
+    """The Content-Length the client declared, or None if absent or not a number (the
+    server rejects a malformed one before the app sees it; the byte count still guards)."""
+    for name, value in scope["headers"]:
+        if name == b"content-length":
+            try:
+                return int(value)
+            except ValueError:
+                return None
+    return None
 
 
 def client_ip(request):

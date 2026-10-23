@@ -1,3 +1,4 @@
+import asyncio
 import threading
 import time
 
@@ -192,3 +193,95 @@ def test_reading_a_saved_portfolio_without_analysis_keeps_the_general_limit(
     client = TestClient(main.app)
     for _ in range(3):
         assert client.get(f"/portfolios/{saved_portfolio}{query}").status_code == 200
+
+
+def test_a_declared_body_over_the_cap_is_a_413_that_still_carries_cors():
+    r = TestClient(main.app).post("/report", content=b" " * (64 * 1024 + 1),
+                                  headers={**ORIGIN, "Content-Type": "application/json"})
+    assert r.status_code == 413
+    assert r.json() == {"detail": "request body too large"}
+    assert r.headers["access-control-allow-origin"] == "http://localhost:5173"
+
+
+def test_import_has_a_larger_cap_than_every_other_path():
+    client = TestClient(main.app)
+    body = b" " * (100 * 1024)
+    headers = {"Content-Type": "application/json"}
+    assert client.post("/report", content=body, headers=headers).status_code == 413
+    assert client.post("/portfolios", content=body, headers=headers).status_code == 413
+    assert client.post("/import", content=body, headers=headers).status_code == 422  # reached the schema
+    over = client.post("/import", content=b" " * (1_500_000 + 1), headers=headers)
+    assert over.status_code == 413
+
+
+def test_a_chunked_body_over_the_cap_is_a_413_that_still_carries_cors():
+    """No Content-Length to check (httpx sends a generator as Transfer-Encoding: chunked)."""
+    chunks = (b" " * 1024 for _ in range(200))
+    r = TestClient(main.app).post("/report", content=chunks,
+                                  headers={**ORIGIN, "Content-Type": "application/json"})
+    assert r.status_code == 413
+    assert r.json() == {"detail": "request body too large"}
+    assert r.headers["access-control-allow-origin"] == "http://localhost:5173"
+
+
+def test_a_chunked_body_is_not_read_past_the_cap():
+    """Drives the real app one 1 KB message at a time; TestClient would buffer the lot first."""
+    pulled = []
+
+    async def receive():
+        pulled.append(1)
+        return {"type": "http.request", "body": b" " * 1024, "more_body": len(pulled) < 2_000}
+
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "POST",
+             "scheme": "http", "path": "/report", "raw_path": b"/report", "query_string": b"",
+             "root_path": "", "client": ("203.0.113.9", 5000), "server": ("testserver", 80),
+             "headers": [(b"origin", b"http://localhost:5173"), (b"content-type", b"application/json"),
+                         (b"transfer-encoding", b"chunked")]}
+    asyncio.run(main.app(scope, receive, send))
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    assert start["status"] == 413
+    assert (b"access-control-allow-origin", b"http://localhost:5173") in start["headers"]
+    assert len(pulled) == 65                  # 64 KB is 64 chunks; the 65th crosses the cap
+
+
+def test_a_declared_body_over_the_cap_is_refused_without_reading_any_of_it():
+    reads = []
+
+    async def receive():
+        reads.append(1)
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    async def never_called(scope, receive, send):
+        raise AssertionError("the app must not run")
+
+    scope = {"type": "http", "method": "POST", "path": "/report", "headers": [(b"content-length", b"999999999")]}
+    asyncio.run(limits.BodyLimit(never_called, caps={}, default=65_536)(scope, receive, send))
+    assert reads == []
+    assert sent[0]["status"] == 413
+
+
+def test_a_body_exactly_at_the_cap_goes_through():
+    got = []
+
+    async def app(scope, receive, send):
+        got.append((await receive())["body"])
+
+    async def receive():
+        return {"type": "http.request", "body": b"x" * 100, "more_body": False}
+
+    async def send(message):
+        pass
+
+    scope = {"type": "http", "method": "POST", "path": "/x", "headers": [(b"content-length", b"100")]}
+    asyncio.run(limits.BodyLimit(app, caps={}, default=100)(scope, receive, send))
+    assert got == [b"x" * 100]

@@ -1,4 +1,5 @@
 import dataclasses
+import json
 
 import pandas as pd
 import pytest
@@ -282,7 +283,9 @@ def test_a_422_does_not_echo_an_oversized_input_back():
 
 
 def test_a_422_truncates_an_oversized_ticker_in_the_message_and_the_echo():
-    r = client.post("/report", json={"holdings": {"A" * 300_000: 100}})
+    # 60,000 characters: still 300 times the echo cap, but under /report's 64 KB body cap.
+    # A 300,000-character ticker is now a 413 before it reaches validation.
+    r = client.post("/report", json={"holdings": {"A" * 60_000: 100}})
     assert r.status_code == 422
     assert len(r.content) < 2_000
 
@@ -300,3 +303,47 @@ def test_import_returns_exactly_fifty_notes_uncapped():
     r = client.post("/import", json={"format": "paste", "text": "x\n" * 50})
     notes = r.json()["notes"]
     assert len(notes) == 50 and not any("more lines" in n for n in notes)
+
+
+def test_a_huge_holdings_object_is_refused_before_it_is_parsed():
+    """One 20 MB POST of 1.5M holdings once pushed the process from 302 to 799 MiB."""
+    body = json.dumps({"holdings": {f"T{i}": 1 for i in range(100_000)}}).encode()
+    assert len(body) > 1_000_000
+    r = client.post("/report", content=body, headers={"Content-Type": "application/json"})
+    assert r.status_code == 413
+    assert len(r.content) < 1_000
+
+
+def test_a_422_echoes_only_the_first_twenty_keys_of_a_big_holdings_object():
+    r = client.post("/report", json={"holdings": {f"T{i}": 1 for i in range(3_000)}})
+    assert r.status_code == 422
+    assert len(r.content) < 3_000
+    echoed = r.json()["detail"][0]["input"]
+    assert len(echoed) == 21 and echoed["…"] == "2980 more"
+    assert list(echoed)[:20] == [f"T{i}" for i in range(20)]
+
+
+def test_json_safe_keeps_the_first_twenty_list_items_and_counts_the_rest():
+    assert main._json_safe(list(range(100))) == list(range(20)) + ["…80 more"]
+    assert main._json_safe(list(range(20))) == list(range(20))
+
+
+def test_json_safe_keeps_the_first_twenty_dict_keys_and_counts_the_rest():
+    out = main._json_safe({f"k{i}": i for i in range(100)})
+    assert list(out) == [f"k{i}" for i in range(20)] + ["…"]
+    assert out["…"] == "80 more"
+    exact = {f"k{i}": i for i in range(20)}
+    assert main._json_safe(exact) == exact
+
+
+def test_json_safe_caps_containers_inside_containers():
+    out = main._json_safe([{"input": list(range(50))}])
+    assert out == [{"input": list(range(20)) + ["…30 more"]}]
+
+
+def test_import_accepts_200000_characters_even_when_json_escapes_every_one():
+    """Six bytes per character is the worst case: 200,000 of them are about 1.2 MB."""
+    body = json.dumps({"format": "paste", "text": "é" * 200_000}).encode("ascii")
+    assert len(body) > 1_200_000
+    r = client.post("/import", content=body, headers={"Content-Type": "application/json"})
+    assert r.status_code == 200

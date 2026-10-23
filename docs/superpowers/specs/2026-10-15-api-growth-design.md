@@ -228,7 +228,8 @@ Per-IP fixed window of 60 seconds:
 - **Client IP** is the **last** `X-Forwarded-For` entry, the one Render's proxy adds. The first entry is client-controlled and spoofable. This is verified on Render in the measurement step. If Render's header differs, the rule changes before ship.
 - **Compute gate:** `/report` and `/analyze` share a `threading.BoundedSemaphore(2)`. A request that can't get a slot within 15 s returns 503 `{"detail": "busy"}` with `Retry-After: 10`. This protects memory, not just CPU.
   - At most 8 requests wait for a slot (`max_waiting=8`). Beyond that, the request gets an immediate 503 busy instead of tying up another worker thread for 15 s.
-- **422 bodies:** a 422 echoes the offending input back, at most 200 characters per string, with lone surrogates replaced, so a huge or unencodable value can't turn the 422 into a 500 or an outsized response.
+- **422 bodies:** a 422 echoes the offending input back, at most 200 characters per string and at most 20 items per list or dict (the rest is a `"…N more"` marker, or a `"…": "N more"` entry in a dict), with lone surrogates replaced, so a huge or unencodable value can't turn the 422 into a 500 or an outsized response.
+- **Request-body size:** a small ASGI middleware (`limits.BodyLimit`) answers **413** `{"detail": "request body too large"}` when the body passes its cap: **1.5 MB for `/import`** (200,000 characters at the worst case of 6 bytes each), **64 KB for every other path**. A declared `Content-Length` over the cap is refused without reading the body; a chunked body is counted as it arrives and cut off once it crosses. It sits inside the rate limiter and the CORS middleware, so the 413 still carries CORS headers. Without it, one 20 MB POST of 1.5M holdings took the process from 302 to 799 MiB, which a 512 MB instance cannot survive.
 
 ## 7. Bugs fixed along the way
 

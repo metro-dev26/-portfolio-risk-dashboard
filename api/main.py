@@ -2,6 +2,7 @@
 (via pydantic) -> call the engine/store -> return a typed model. The auto-generated
 Swagger UI at /docs is the point. Educational tool, not financial advice."""
 import functools
+import itertools
 import logging
 import math
 import os
@@ -27,8 +28,11 @@ from risk_engine.report import build_report
 log = logging.getLogger(__name__)
 
 _MAX_ECHO_CHARS = 200
+_MAX_ECHO_ITEMS = 20
 _LONE_SURROGATE = re.compile(r"[\ud800-\udfff]")
 _MAX_IMPORT_NOTES = 50
+_MAX_IMPORT_BODY = 1_500_000      # 200,000 characters at the worst case of 6 bytes each (\uXXXX)
+_MAX_BODY = 64 * 1024             # every other route takes at most 50 holdings or a short name
 
 app = FastAPI(
     title="MarketPlug Risk API",
@@ -54,6 +58,11 @@ def _rate_limit_path(request: Request):
     return path
 
 
+# Added first, so it runs innermost: an oversized body is refused before any route parses it,
+# and the 413 travels out through the outer middleware like any other response.
+app.add_middleware(limits.BodyLimit, caps={"/import": _MAX_IMPORT_BODY}, default=_MAX_BODY)
+
+
 @app.middleware("http")
 async def _rate_limit(request: Request, call_next):
     if request.method != "OPTIONS":
@@ -65,8 +74,8 @@ async def _rate_limit(request: Request, call_next):
 
 
 app.add_middleware(GZipMiddleware, minimum_size=1000)
-# Added last, so it runs outermost: even a 429 or 503 carries CORS headers and the browser
-# shows the real error instead of a CORS failure.
+# Added last, so it runs outermost: even a 413, 429 or 503 carries CORS headers and the
+# browser shows the real error instead of a CORS failure.
 app.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS, allow_methods=["GET", "POST"],
                    allow_headers=["Content-Type"], expose_headers=["Retry-After"],
                    allow_credentials=False)
@@ -79,19 +88,26 @@ def _echo_text(text):
 
 def _json_safe(obj):
     """Make a 422 payload serializable and small. It echoes the offending input back,
-    and three kinds of input turn the clean 422 into a 500 or an outsized response:
+    and four kinds of input turn the clean 422 into a 500 or an outsized response:
     inf/NaN (Starlette's JSON encoder has allow_nan=False) become their string form, a
-    lone UTF-16 surrogate (not encodable as UTF-8) becomes U+FFFD, and any string over
-    _MAX_ECHO_CHARS is cut short. Scrub the whole payload, keys included, so validation
-    failures always serialize."""
+    lone UTF-16 surrogate (not encodable as UTF-8) becomes U+FFFD, any string over
+    _MAX_ECHO_CHARS is cut short, and any list or dict over _MAX_ECHO_ITEMS keeps its
+    first _MAX_ECHO_ITEMS entries plus a count of the rest. Scrub the whole payload, keys
+    included, so validation failures always serialize."""
     if isinstance(obj, str):
         return _echo_text(obj)
     if isinstance(obj, float):
         return obj if math.isfinite(obj) else str(obj)
     if isinstance(obj, dict):
-        return {_json_safe(k): _json_safe(v) for k, v in obj.items()}
+        kept = {_json_safe(k): _json_safe(v) for k, v in itertools.islice(obj.items(), _MAX_ECHO_ITEMS)}
+        if len(obj) > _MAX_ECHO_ITEMS:
+            kept["…"] = f"{len(obj) - _MAX_ECHO_ITEMS} more"
+        return kept
     if isinstance(obj, list):
-        return [_json_safe(v) for v in obj]
+        kept = [_json_safe(v) for v in obj[:_MAX_ECHO_ITEMS]]
+        if len(obj) > _MAX_ECHO_ITEMS:
+            kept.append(f"…{len(obj) - _MAX_ECHO_ITEMS} more")
+        return kept
     return obj
 
 
