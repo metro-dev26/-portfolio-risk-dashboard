@@ -14,7 +14,9 @@ def test_prepare_builds_weights_returns_and_benchmark():
     assert inp.tickers == ["AAPL", "TLT"] and inp.value == 40000.0
     assert inp.weights.tolist() == [0.75, 0.25]
     assert inp.pr.index.equals(inp.spy_r.index)
-    assert inp.pr.iloc[0] == pytest.approx(0.75 * inp.lr["AAPL"].iloc[0] + 0.25 * inp.lr["TLT"].iloc[0])
+    # exact rebalanced log return since project A
+    first = np.log(0.75 * np.exp(inp.lr["AAPL"].iloc[0]) + 0.25 * np.exp(inp.lr["TLT"].iloc[0]))
+    assert inp.pr.iloc[0] == pytest.approx(first)
     assert inp.window.status == "ok"
 
 

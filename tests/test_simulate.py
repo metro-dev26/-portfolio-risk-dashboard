@@ -87,7 +87,8 @@ def test_volatile_stock_scores_above_spy_and_bonds_below(market):
     _, lr = market
     spy = _score(lr, ["SPY"], [1.0])
     assert _score(lr, ["TSLA"], [1.0]) > spy
-    # The score includes drift, and long-duration bonds score about the same as SPY on this snapshot.
+    # The score includes drift: intermediate Treasuries score below SPY, long-duration ones (TLT)
+    # score well above it on this snapshot, so only IEF is asserted.
     assert _score(lr, ["IEF"], [1.0]) < spy
 
 
@@ -101,3 +102,4 @@ def test_peak_memory_stays_under_150_mb_at_full_size(market):
     finally:
         tracemalloc.stop()
     assert peak < 150 * 2**20, f"peak {peak / 2**20:.0f} MB"
+

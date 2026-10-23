@@ -76,8 +76,8 @@ It is linear on purpose. Tam has to be able to explain it in one sentence: "scor
 - The score rises when L rises (monotonic).
 - An all-SPY portfolio scores the same as the benchmark score.
 - A single high-volatility stock (TSLA) scores above SPY.
-- Intermediate Treasuries (IEF) score below SPY. Long-duration Treasuries do not: the score includes drift. Measured 2026-10-23 as bare return series on one common window (2,126 daily returns, prices 2018-01-02 to 2026-06-18) with the full 10,000 paths and the same draws: SPY 28, TLT 40, IEF 17, TLT/IEF 50/50 29. So the 50/50 mix lands within a point of SPY. These match the report-level numbers because the report uses the same window.
-- The mixed 30/20/40/10 portfolio (AAPL, JPM, TLT, IEF) still scores below SPY: 20 against 28.
+- Intermediate Treasuries (IEF) score below SPY. Long-duration Treasuries do not: the score includes drift. Measured 2026-10-23 as bare return series on one common window (2,126 daily returns, prices 2018-01-02 to 2026-06-18) with the full 10,000 paths and the same draws: SPY 28, TLT 40, IEF 17, TLT/IEF 50/50 29. So the 50/50 mix lands within a point of SPY. These match the report-level numbers because the report uses the same window. Re-measured the same way after portfolio returns became exact daily-rebalanced log returns (section 10): the single series are unchanged and the 50/50 mix stays at 29.
+- The mixed 30/20/40/10 portfolio (AAPL, JPM, TLT, IEF) still scores below SPY: 17 against 28 (it was 20 before the exact rebalanced return: the weighted sum of log returns understated the mix's growth, so its bad year looked worse than it is).
 - The score is bounded to 1..99.
 
 ## 3. Architecture
@@ -308,5 +308,7 @@ That's a known, bounded change because every section is already its own function
 - The stress test assumes buy-and-hold.
 
 Both are stated in `assumptions`.
+
+**Portfolio returns are exact daily-rebalanced log returns.** `metrics.portfolio_returns` is `log(Σ w·exp(r))`, the log of what a portfolio rebalanced to today's weights each day earns. The weighted sum of log returns, `Σ w·r`, understates a diversified portfolio's growth (the final review measured 1.8 to 4.0 points a year of annual drift, and a 50-stock equal-weight portfolio scoring 33 against an exact 28), so every portfolio number, `/analyze` included, moved slightly when this was fixed. The shape of every response is unchanged.
 
 **Rate limits reset on restart.** They are per-process, which is fine for one free instance. They are not a defence against a determined attacker, and nothing here is.

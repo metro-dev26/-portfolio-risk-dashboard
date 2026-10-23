@@ -5,8 +5,11 @@ from risk_engine.config import TRADING_DAYS
 
 
 def portfolio_returns(log_returns, holdings, weights):
+    """Daily log return of a portfolio rebalanced to `weights` every day: log(sum(w * exp(r))).
+    The weighted sum of log returns is not it: it understates a diversified portfolio's growth
+    by about half the gap between the holdings' average variance and the portfolio's."""
     ret_sel = log_returns[holdings].dropna()
-    return (ret_sel * weights).sum(axis=1)
+    return np.log((np.exp(ret_sel) * weights).sum(axis=1))
 
 
 def historical_var_cvar(port_returns, conf):

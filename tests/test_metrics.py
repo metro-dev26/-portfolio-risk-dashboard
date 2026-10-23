@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from scipy.stats import norm
 from risk_engine import metrics
 from tests.conftest import HOLDINGS, CONF
@@ -17,6 +18,8 @@ def test_gaussian_var_matches_closed_form(normal_returns):
     assert abs(var - (mu + sd * norm.ppf(0.05))) < 1e-9
 
 
+# exact rebalanced log return since project A: the seven portfolio-return keys in golden.json
+# (hist/gauss VaR and CVaR, ann_vol, sharpe, max_dd) were re-pinned; tools/snapshot_reference.py makes them.
 def test_metrics_reproduce_golden(market, ref_weights, golden):
     _, lr = market
     pr = metrics.portfolio_returns(lr, HOLDINGS, ref_weights)
@@ -49,3 +52,17 @@ def test_student_t_cvar_worse_than_var():
     heavy = pd.Series(tdist.rvs(df=4, size=100_000, random_state=rng) * 0.01)
     var, cvar = metrics.student_t_var_cvar(heavy, 0.95)
     assert cvar < var
+
+
+def test_portfolio_return_is_the_log_of_the_weighted_simple_returns():
+    """A daily-rebalanced portfolio earns sum(w * simple return) a day, so its log return is
+    log(sum(w * exp(r))), not sum(w * r). Two assets, three days, worked by hand."""
+    import pandas as pd
+    lr = pd.DataFrame({"A": [np.log(2.0), 0.0, np.log(0.8), np.nan],
+                       "B": [np.log(0.5), np.log(3.0), np.log(0.8), 1.0]})
+    pr = metrics.portfolio_returns(lr, ["A", "B"], np.array([0.25, 0.75]))
+    # day 1: .25*2 + .75*.5 = .875;  day 2: .25*1 + .75*3 = 2.5;  day 3: .8 whatever the weights
+    assert len(pr) == 3                                  # the row with a missing return is dropped
+    np.testing.assert_allclose(pr.to_numpy(), np.log([0.875, 2.5, 0.8]), rtol=0, atol=1e-12)
+    # one dollar, rebalanced daily, ends at the product of the daily gross returns
+    assert float(np.exp(pr.cumsum()).iloc[-1]) == pytest.approx(0.875 * 2.5 * 0.8)
