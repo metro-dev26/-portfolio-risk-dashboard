@@ -348,6 +348,10 @@ def run(mode, prev_dir, out_dir, *, fetch=fetch_yf, get_html=None, get_factors=f
         if t not in prices.columns and t not in failed:
             failed[t] = "no data returned"
     benchmark_missing = BENCHMARK in failed or BENCHMARK not in prices.columns
+    if not benchmark_missing:
+        # A close Yahoo posted before the benchmark's would ship as a near-empty last
+        # row; the next run's overlap window fetches that day again.
+        prices = prices.loc[:prices[BENCHMARK].dropna().index.max()]
     held = quality_gate(prices)
     prices = prices.drop(columns=list(held))
 

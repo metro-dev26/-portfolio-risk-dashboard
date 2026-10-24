@@ -285,6 +285,24 @@ def test_full_run_writes_a_readable_bundle(tmp_path, small_bounds):
     assert not (tmp_path / "out" / "blocked_report.json").exists()
 
 
+def test_a_close_newer_than_the_benchmark_is_left_for_the_next_run(tmp_path, small_bounds):
+    # Yahoo can post one ticker's close before SPY's.
+    html, fetch, factors = _fake_world()
+
+    def fetch_with_early_close(tickers, start):
+        got, failed = fetch(tickers, start)
+        early = pd.Series([151.0], index=pd.to_datetime(["2026-06-19"]))
+        got["T0"] = pd.concat([got["T0"], early])
+        return got, failed
+
+    report = _run_full(tmp_path, html, fetch_with_early_close, factors)
+    snap = data.read_bundle(str(tmp_path / "out"), "release")
+    assert report["as_of"] == "2026-06-18"
+    assert str(snap.prices.index.max().date()) == "2026-06-18"
+    n = len(snap.universe)
+    assert data.freshness_line(snap).endswith(f"{n}/{n} tickers")
+
+
 def test_too_many_failures_blocks_publishing(tmp_path, small_bounds):
     html, fetch, factors = _fake_world(n_good=100, n_fail=5)     # ~4% of ~132 tickers
     with pytest.raises(SystemExit, match="not publishing"):
