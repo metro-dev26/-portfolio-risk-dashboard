@@ -284,7 +284,7 @@ def test_a_422_does_not_echo_an_oversized_input_back():
 
 def test_a_422_truncates_an_oversized_ticker_in_the_message_and_the_echo():
     # 60,000 characters: still 300 times the echo cap, but under /report's 64 KB body cap.
-    # A 300,000-character ticker is now a 413 before it reaches validation.
+    # A 300,000-character ticker is refused with a 413 before it reaches validation.
     r = client.post("/report", json={"holdings": {"A" * 60_000: 100}})
     assert r.status_code == 422
     assert len(r.content) < 2_000

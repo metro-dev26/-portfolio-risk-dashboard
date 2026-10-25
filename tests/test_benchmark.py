@@ -35,7 +35,7 @@ def test_benchmark_column_matches_the_old_inline_math(market):
 
 
 def test_beta_uses_one_degrees_of_freedom_convention(market):
-    # The old code divided an ddof=1 covariance by an ddof=0 variance, inflating beta by n/(n-1).
+    # Covariance and variance must share ddof, or beta comes out inflated by n/(n-1).
     _, lr = market
     pr, spy = _pr(lr), lr["SPY"]
     n = len(spy)

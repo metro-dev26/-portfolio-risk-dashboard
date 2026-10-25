@@ -18,8 +18,8 @@ def test_gaussian_var_matches_closed_form(normal_returns):
     assert abs(var - (mu + sd * norm.ppf(0.05))) < 1e-9
 
 
-# exact rebalanced log return since project A: the seven portfolio-return keys in golden.json
-# (hist/gauss VaR and CVaR, ann_vol, sharpe, max_dd) were re-pinned; tools/snapshot_reference.py makes them.
+# The seven portfolio-return keys in golden.json (hist/gauss VaR and CVaR, ann_vol, sharpe,
+# max_dd) use the exact daily-rebalanced log return; tools/snapshot_reference.py makes them.
 def test_metrics_reproduce_golden(market, ref_weights, golden):
     _, lr = market
     pr = metrics.portfolio_returns(lr, HOLDINGS, ref_weights)

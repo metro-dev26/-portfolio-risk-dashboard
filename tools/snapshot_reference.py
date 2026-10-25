@@ -18,7 +18,7 @@ lr = np.log(prices / prices.shift(1)).dropna()
 
 weights = np.ones(len(HOLDINGS)) / len(HOLDINGS)
 ret_sel = lr[HOLDINGS].dropna()
-pr = np.log((np.exp(ret_sel) * weights).sum(axis=1))    # exact rebalanced log return since project A
+pr = np.log((np.exp(ret_sel) * weights).sum(axis=1))    # exact daily-rebalanced log return
 mu, std = pr.mean(), pr.std()
 
 h_var = np.percentile(pr, (1 - CONF) * 100)
